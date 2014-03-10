@@ -1,3 +1,1 @@
-{{ range Categories.posts }}
-  {{ template "post" . }}
-{{ end }}
+{{ range .Categories.posts.Posts }}{{ template "post" . }}{{ end }}
