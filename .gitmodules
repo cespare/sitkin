@@ -1,6 +1,0 @@
-[submodule "vendor/src/github.com/cespare/blackfriday"]
-	path = vendor/src/github.com/cespare/blackfriday
-	url = https://github.com/cespare/blackfriday.git
-[submodule "vendor/src/github.com/BurntSushi/toml"]
-	path = vendor/src/github.com/BurntSushi/toml
-	url = https://github.com/BurntSushi/toml.git
