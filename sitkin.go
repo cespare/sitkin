@@ -13,6 +13,7 @@ import (
 
 const (
 	configFile  = "_config.toml"
+	destDir = "_gen"
 	templateDir = "_templates"
 )
 
@@ -41,11 +42,8 @@ type TOMLConfig struct {
 
 func LoadConfig(filename string) (*SitkinRoot, error) {
 	config := &TOMLConfig{}
-	meta, err := toml.DecodeFile(filename, config)
+	_, err := toml.DecodeFile(filename, config)
 	if err != nil {
-		return nil, err
-	}
-	if err := ValidateTOMLConfig(meta); err != nil {
 		return nil, err
 	}
 	root := &SitkinRoot{
@@ -56,11 +54,6 @@ func LoadConfig(filename string) (*SitkinRoot, error) {
 		root.Categories[c.Name] = category
 	}
 	return root, nil
-}
-
-func ValidateTOMLConfig(meta toml.MetaData) error {
-	fmt.Printf("\033[01;34m>>>> meta: %#v\x1B[m\n", meta)
-	return nil
 }
 
 func main() {
@@ -100,10 +93,17 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	for _, t := range topLevel {
-		fmt.Println(">>>", t)
-		if err := templates.ExecuteTemplate(os.Stdout, t, root); err != nil {
-			fatal(err)
+
+	files, err := ioutil.ReadDir(".")
+	if err != nil {
+		fatal(err)
+	}
+	// * For each category, find a _catname directory and render it according to the category configuration
+	// * For each file *.tmpl, render
+	// * For each file and directory not starting with _, copy over directly
+	for _, f := range files {
+		if !strings.HasPrefix(f.Name(), "_") {
+			if err := CopyFiles(filepath.Join(f.Name()), f.Name())
 		}
 	}
 }
