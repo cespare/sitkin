@@ -1,3 +1,5 @@
+basetemplate = "base"
+
 [[categories]]
 name = "posts"
-template = "post"
+layout = "post"

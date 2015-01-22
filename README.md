@@ -16,7 +16,8 @@ sitkin is yet another static blog engine written in Go.
 +-PROJECT_ROOT
   +-_config.toml                      # The configuration.
   +-_compiled/                        # _compiled contains the compiled site.
-  +-_templates/                       # templates contains Go templates (.tmpl files).
+  +-_templates/                       # all templates are loaded along with each layout
+  +-_layouts/                         # layout templates
   +-_posts/                           # posts is a directory specified in POST_DIRS in config.toml.
   | +-2013-07-24-18-19-hello-world.md # A post must be a markdown file named with a timestamp.
   +-assets/                           # Any file or directory not starting with _ is copied directly.
@@ -41,3 +42,9 @@ template = "post" # The default template for posts in this category.
 ## Variables
 
 TODO
+
+## Flow
+
+* Load `_config.toml`
+* `_config.toml` contains a toml table of categories. Categories have a name and a template.
+* Make a base template named "root" and load in all tmpl files in `_templates`, named by base filename.

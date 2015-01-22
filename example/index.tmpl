@@ -1,1 +1,3 @@
-{{ range .Categories.posts.Posts }}{{ template "post" . }}{{ end }}
+{{define "contents"}}
+{{range .Categories.posts.Entries}}{{.Title}}{{end}}
+{{end}}
