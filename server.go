@@ -4,13 +4,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // fs implements http.FileSystem
 type fs string
 
 func (f fs) Open(path string) (http.File, error) {
-	return os.Open(filepath.Join(string(f), path+".html"))
+	if !strings.ContainsRune(path, '.') {
+		path += ".html"
+	}
+	return os.Open(filepath.Join(string(f), path))
 }
 
 var handler = http.FileServer(fs(destDir))
