@@ -1,5 +1,0 @@
-basetemplate = "base"
-
-[[categories]]
-name = "posts"
-layout = "post"
