@@ -1,53 +1,38 @@
-# sitkin
+# Sitkin
 
-sitkin is yet another static blog engine written in Go.
+Sitkin is yet another static blog engine written in Go.
 
-## TODO
+## Project layout for Sitkin
 
-* MVP: an outer template that render the main index page and individual post
-  pages (from markdown documents).
-* TOML configuration
-* Multiple post types (specified in configuration)
-* TOML front matter
-
-## Project layout for sitkin
+Here's an example:
 
 ```
-+-PROJECT_ROOT
-  +-_config.toml                      # The configuration.
-  +-_compiled/                        # _compiled contains the compiled site.
-  +-_templates/                       # all templates are loaded along with each layout
-  +-_layouts/                         # layout templates
-  +-_posts/                           # posts is a directory specified in POST_DIRS in config.toml.
-  | +-2013-07-24-18-19-hello-world.md # A post must be a markdown file named with a timestamp.
-  +-assets/                           # Any file or directory not starting with _ is copied directly.
-  | +-css/
-  | +-js/
-  | +-images/
-  +-index.tmpl                        # Any tmpl or md file outside the above directories that contains
-  +-about.md                          # TOML front matter is compiled to an html file.
+├── sitkin
+│   ├── default.tmpl
+│   └── posts.tmpl
+├── posts
+│   └── 2018-03-05.hello-world.md
+├── gen
+├── assets
+│   ├── css
+│   ├── images
+│   └── js
+├── index.tmpl
+└── about.md
 ```
 
-## Config file
-
-`_config.toml` is a TOML file.
-
-``` toml
-[category.posts]  # Any category needs a named section called category.NAME.
-                  # The posts for the category will be in _NAME and the compiled
-                  # html files will be in _compiled/NAME/.
-
-template = "post" # The default template for posts in this category.
-```
-
-## Variables
-
-TODO
-
-## Flow
-
-* Load `_config.toml`
-* `_config.toml` contains a toml table of categories. Categories have a name and
-  a template.
-* Make a base template named "root" and load in all tmpl files in `_templates`,
-  named by base filename.
+* The `sitkin` directory contains templates that are used to render other files.
+  - `default.tmpl` is the default template that renders every page.
+  - `posts.tmpl`, in this example, is the template for the posts directory.
+  - When rendering posts (in this example), the template set contains
+    `default.tmpl` and `posts.tmpl`. When rendering other pages, the template
+    set contains only `default.tmpl`.
+* The posts directory is a *file set* of Markdown files. In this case Sitkin
+  knows that posts should be rendered (rather than just copied directly) because
+  of `sitkin/posts.tmpl`.
+  - Each markdown file can include metadata, which is arbitrary JSON text
+    accessible from the template, at the beginning of the file delimited by an
+    HTML comment (`<!--` and `-->`).
+* The `gen` directory contains the generated files. (It should be gitignored.)
+* Other directories, like `assets` in this example, are directly copied as-is.
+* Templates like `index.tmpl` and markdown files are rendered to html files.
