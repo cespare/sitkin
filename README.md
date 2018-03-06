@@ -2,6 +2,8 @@
 
 Sitkin is yet another static blog engine written in Go.
 
+I wrote this purely to satisfy my own needs for my own website.
+
 ## Project layout for Sitkin
 
 Here's an example:
