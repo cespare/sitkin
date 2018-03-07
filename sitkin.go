@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cespare/cp"
+	"github.com/cespare/fswatch"
 	"gopkg.in/russross/blackfriday.v2"
 )
 
@@ -407,8 +408,17 @@ If dir is not given, then the current directory is used.
 	}
 
 	go func() {
-		// FIXME: watch for file changes.
-		build(dir)
+		events, errs, err := fswatch.Watch(dir, 500*time.Millisecond)
+		if err != nil {
+			log.Fatalln("Cannot watch project dir for changes:", err)
+		}
+		go func() {
+			err := <-errs
+			log.Fatalln("Error watching project dir for changes:", err)
+		}()
+		for range events {
+			build(dir)
+		}
 	}()
 
 	fs := http.FileServer(filesystem{dir: filepath.Join(dir, "gen")})
