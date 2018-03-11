@@ -11,7 +11,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,9 +28,11 @@ type sitkin struct {
 	templateFiles []*templateFile
 	markdownFiles []*markdownFile
 	forCopy       []string // files/dirs to copy directly (basename only)
+
+	ctx *context
 }
 
-func load(dir string) (*sitkin, error) {
+func load(dir string, devMode bool) (*sitkin, error) {
 	// Initial sanity check.
 	sitkinDir := filepath.Join(dir, "sitkin")
 	stat, err := os.Stat(sitkinDir)
@@ -59,6 +60,10 @@ func load(dir string) (*sitkin, error) {
 		dir: dir,
 		templates: map[string]*template.Template{
 			"default": defaultTmpl,
+		},
+		ctx: &context{
+			DevMode:  devMode,
+			FileSets: make(map[string]*fileSetContext),
 		},
 	}
 	unusedTemplates := make(map[string]struct{})
@@ -134,6 +139,19 @@ func load(dir string) (*sitkin, error) {
 	sort.Strings(unused)
 	if len(unused) > 0 {
 		log.Println("Warning: the following templates are not used:", unused)
+	}
+
+	// Fill in fileSetContexts.
+	for _, fs := range s.fileSets {
+		var fsctx fileSetContext
+		for _, mf := range fs.files {
+			fsctx.Files = append(fsctx.Files, &fileContext{
+				Name:     mf.name,
+				Date:     mf.date,
+				Metadata: mf.metadata,
+			})
+		}
+		s.ctx.FileSets[fs.name] = &fsctx
 	}
 
 	return s, nil
@@ -319,6 +337,22 @@ func (s *sitkin) renderFileSet(fs *fileSet) error {
 	return nil
 }
 
+// context is the common context to all templates.
+type context struct {
+	DevMode  bool
+	FileSets map[string]*fileSetContext
+}
+
+type fileSetContext struct {
+	Files []*fileContext
+}
+
+type fileContext struct {
+	Name     string
+	Date     time.Time
+	Metadata map[string]interface{}
+}
+
 func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile) error {
 	f, err := os.Create(filepath.Join(dir, md.name+".html"))
 	if err != nil {
@@ -326,10 +360,12 @@ func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile) error {
 	}
 	defer f.Close()
 	ctx := struct {
+		*context
 		Contents template.HTML
 		Date     time.Time
 		Metadata map[string]interface{}
 	}{
+		context:  s.ctx,
 		Contents: template.HTML(blackfriday.Run(md.contents)),
 		Date:     md.date,
 		Metadata: md.metadata,
@@ -346,7 +382,7 @@ func (s *sitkin) renderTemplate(tf *templateFile) error {
 		return err
 	}
 	defer f.Close()
-	if err := tf.tmpl.Execute(f, nil); err != nil {
+	if err := tf.tmpl.Execute(f, s.ctx); err != nil {
 		return err
 	}
 	return f.Close()
@@ -359,8 +395,10 @@ func (s *sitkin) renderMarkdown(md *markdownFile) error {
 	}
 	defer f.Close()
 	ctx := struct {
+		*context
 		Contents template.HTML
 	}{
+		context:  s.ctx,
 		Contents: template.HTML(blackfriday.Run(md.contents)),
 	}
 	if err := md.tmpl.Execute(f, ctx); err != nil {
@@ -398,17 +436,14 @@ If dir is not given, then the current directory is used.
 		os.Exit(1)
 	}
 
-	if !build(dir) {
-		if *httpAddr == "" {
-			os.Exit(1)
-		}
-	}
-	if *httpAddr == "" {
+	devMode := *httpAddr != ""
+	build(dir, devMode)
+	if !devMode {
 		return
 	}
 
 	go func() {
-		events, errs, err := fswatch.Watch(dir, 500*time.Millisecond)
+		events, errs, err := fswatch.Watch(dir, 500*time.Millisecond, "gen")
 		if err != nil {
 			log.Fatalln("Cannot watch project dir for changes:", err)
 		}
@@ -417,42 +452,32 @@ If dir is not given, then the current directory is used.
 			log.Fatalln("Error watching project dir for changes:", err)
 		}()
 		for range events {
-			build(dir)
+			build(dir, devMode)
 		}
 	}()
 
-	fs := http.FileServer(filesystem{dir: filepath.Join(dir, "gen")})
+	fs := http.FileServer(http.Dir(filepath.Join(dir, "gen")))
 	log.Fatal(http.ListenAndServe(*httpAddr, fs))
 }
 
-// filesystem implements http.FileSystem.
-type filesystem struct {
-	dir string
-}
-
-func (fs filesystem) Open(name string) (http.File, error) {
-	if name == "/" {
-		name = "/index.html"
-	}
-	if !strings.Contains(path.Base(name), ".") {
-		name += ".html"
-	}
-	return os.Open(filepath.Join(fs.dir, name))
-}
-
-func build(dir string) (ok bool) {
+func build(dir string, devMode bool) {
 	start := time.Now()
-	s, err := load(dir)
+	s, err := load(dir, devMode)
 	if err != nil {
 		log.Println("Error loading sitkin project:", err)
-		return false
+		if !devMode {
+			os.Exit(1)
+		}
+		return
 	}
 	if err := s.render(); err != nil {
 		log.Println("Error rendering sitkin project:", err)
-		return false
+		if !devMode {
+			os.Exit(1)
+		}
+		return
 	}
 	log.Println("Successfully built in", niceDuration(time.Since(start)))
-	return true
 }
 
 func niceDuration(d time.Duration) string {

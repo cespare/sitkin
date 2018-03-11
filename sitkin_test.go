@@ -46,20 +46,20 @@ func TestSitkin(t *testing.T) {
 	td.writeFile(
 		"sitkin/default.tmpl",
 		`<html>
-  <body>
-    {{block "contents" . -}}
-    {{.Contents}}
-    {{- end}}
-  </body>
+<body>
+{{block "contents" .}}
+{{.Contents}}
+{{end}}
+</body>
 </html>
 `,
 	)
 	td.writeFile(
 		"sitkin/posts.tmpl",
-		`{{define "contents" -}}
+		`{{define "contents"}}
 {{.Metadata.title}}
 {{.Contents}}
-{{- end}}
+{{end}}
 `,
 	)
 	td.writeFile(
@@ -74,12 +74,19 @@ func TestSitkin(t *testing.T) {
 123
 `,
 	)
-	td.writeFile("index.tmpl", `{{define "contents"}}index{{end}}`)
+	td.writeFile("index.tmpl", `{{define "contents"}}
+<ol>
+{{range .FileSets.posts.Files}}
+<li>{{.Metadata.title}}</li>
+{{end}}
+</ol>
+{{end}}
+`)
 	td.writeFile("about.md", "# About\n\nabc")
 	td.writeFile("foo.html", "<p>foo</p>")
 	td.writeFile("assets/css/x.css", "not actually css")
 
-	s, err := load(td.dir)
+	s, err := load(td.dir, false)
 	if err != nil {
 		t.Fatal("load failed:", err)
 	}
@@ -90,34 +97,44 @@ func TestSitkin(t *testing.T) {
 	td.checkFile(
 		"gen/posts/hello-world.html",
 		`<html>
-  <body>
-    Hello World
+<body>
+
+Hello World
 <h1>Hello World</h1>
 
 <p>123</p>
 
-  </body>
+
+</body>
 </html>
 `,
 	)
 	td.checkFile(
 		"gen/index.html",
 		`<html>
-  <body>
-    index
-  </body>
+<body>
+
+<ol>
+
+<li>Hello World</li>
+
+</ol>
+
+</body>
 </html>
 `,
 	)
 	td.checkFile(
 		"gen/about.html",
 		`<html>
-  <body>
-    <h1>About</h1>
+<body>
+
+<h1>About</h1>
 
 <p>abc</p>
 
-  </body>
+
+</body>
 </html>
 `,
 	)
