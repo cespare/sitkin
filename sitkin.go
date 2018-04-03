@@ -9,9 +9,12 @@ import (
 	"html/template"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -409,7 +412,8 @@ func (s *sitkin) renderMarkdown(md *markdownFile) error {
 
 func main() {
 	log.SetFlags(0)
-	httpAddr := flag.String("http", "", "If given, serve on this HTTP address and rebuild files when they change")
+	devAddr := flag.String("devaddr", "", `If given, operate in dev mode: serve at this HTTP address,
+open it in a browser window, and rebuild files when they change`)
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, `Usage:
 
@@ -436,11 +440,14 @@ If dir is not given, then the current directory is used.
 		os.Exit(1)
 	}
 
-	devMode := *httpAddr != ""
-	build(dir, devMode)
-	if !devMode {
+	if *devAddr == "" {
+		build(dir, false)
 		return
 	}
+
+	// Dev mode. Serve HTTP, open up a browser window, rebuild files on change.
+	// Start by building once, synchronously.
+	build(dir, true)
 
 	go func() {
 		events, errs, err := fswatch.Watch(dir, 500*time.Millisecond, "gen")
@@ -452,12 +459,44 @@ If dir is not given, then the current directory is used.
 			log.Fatalln("Error watching project dir for changes:", err)
 		}()
 		for range events {
-			build(dir, devMode)
+			build(dir, true)
+		}
+	}()
+
+	ln, err := net.Listen("tcp", *devAddr)
+	if err != nil {
+		log.Fatalln("Cannot listen on selected address:", err)
+	}
+
+	go func() {
+		// Wait for the server to start before opening a browser window.
+		u := "http://" + ln.Addr().String()
+		var ok bool
+		start := time.Now()
+		const maxWait = time.Second
+		for delay := time.Millisecond; time.Since(start) < maxWait; delay *= 2 {
+			resp, err := http.Get(u)
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			log.Printf("After waiting %s, no content served at %s", maxWait, u)
+			return
+		}
+		if err := openBrowser(u); err != nil {
+			log.Println("Error opening browser:", err)
 		}
 	}()
 
 	fs := http.FileServer(http.Dir(filepath.Join(dir, "gen")))
-	log.Fatal(http.ListenAndServe(*httpAddr, fs))
+	log.Fatal(http.Serve(ln, fs))
+
 }
 
 func build(dir string, devMode bool) {
@@ -502,4 +541,21 @@ func niceDuration(d time.Duration) string {
 		// Don't really care about longer times.
 		return d.String()
 	}
+}
+
+func openBrowser(url string) error {
+	var tool string
+	switch runtime.GOOS {
+	case "darwin":
+		tool = "open"
+	case "linux":
+		tool = "xdg-open"
+	default:
+		return fmt.Errorf("don't know to to open a browser window on GOOS %q", runtime.GOOS)
+	}
+
+	cmd := exec.Command(tool, url)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
 }
