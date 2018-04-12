@@ -90,11 +90,9 @@ func load(dir string, devMode bool) (*sitkin, error) {
 	}
 	for _, fi := range fis {
 		name := fi.Name()
-		switch name {
-		case "sitkin", "gen":
-			continue
-		}
 		switch {
+		case name == "sitkin" || name == "gen" || strings.HasPrefix(name, "."):
+			// Don't copy these.
 		case fi.IsDir():
 			if tmpl, ok := s.templates[name]; ok {
 				fsDir := filepath.Join(dir, name)
