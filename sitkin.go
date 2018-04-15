@@ -308,7 +308,7 @@ func (s *sitkin) render() error {
 	}
 
 	// Copy assets.
-	hashAssets := make(map[string]string) // "/styles/x.css" -> "/styles/x-asdf123.css"
+	hashAssets := make(map[string]string) // "/styles/x.css" -> "/styles/x.asdf123.css"
 	toURLPath := func(baseDir, pth string) string {
 		rel, err := filepath.Rel(baseDir, pth)
 		if err != nil {
@@ -438,7 +438,7 @@ func copyFile(dstDir, src string, hashName bool) (string, error) {
 		ext := path.Ext(base)
 		prefix := strings.TrimSuffix(base, ext)
 		hashStr := hex.EncodeToString(h.Sum(nil)[:12])
-		base = prefix + "-" + hashStr + ext
+		base = prefix + "." + hashStr + ext
 	}
 	dst := filepath.Join(dstDir, base)
 	if err := os.Rename(tmp.Name(), dst); err != nil {

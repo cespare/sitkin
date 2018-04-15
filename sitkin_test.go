@@ -61,9 +61,9 @@ func TestCopyDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bjs := "d2/b-" + hashHex("b") + ".js"
-	ccss := "d2/x/c-" + hashHex("c") + ".css"
-	dtxt := "d2/x/y/d-" + hashHex("d") + ".txt"
+	bjs := "d2/b." + hashHex("b") + ".js"
+	ccss := "d2/x/c." + hashHex("c") + ".css"
+	dtxt := "d2/x/y/d." + hashHex("d") + ".txt"
 
 	td.checkFile("d2/a.html", "a")
 	td.checkFile(bjs, "b")
@@ -145,7 +145,7 @@ func TestSitkin(t *testing.T) {
 		t.Fatal("render failed:", err)
 	}
 
-	cssLink := "/assets/css/x-" + hashHex("css text") + ".css"
+	cssLink := "/assets/css/x." + hashHex("css text") + ".css"
 	td.checkFile(
 		"gen/posts/hello-world.html",
 		"<link href="+cssLink+" rel=stylesheet>Hello World<h1>Hello World</h1><p>123",
@@ -159,7 +159,7 @@ func TestSitkin(t *testing.T) {
 		"<link href="+cssLink+" rel=stylesheet><h1>About</h1><p>abc",
 	)
 	td.checkFile("gen/foo.html", "<p>foo</p>")
-	td.checkFile("gen/assets/css/x-"+hashHex("css text")+".css", "css text")
+	td.checkFile("gen/assets/css/x."+hashHex("css text")+".css", "css text")
 }
 
 type tempDir struct {
