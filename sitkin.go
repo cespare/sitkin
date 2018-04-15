@@ -383,7 +383,7 @@ func (s *sitkin) copyWalk(dst, src string) (filepath.WalkFunc, map[string]string
 			return os.Mkdir(target, info.Mode())
 		}
 		hashName := !s.devMode
-		if src == "favicon.ico" {
+		if filepath.Base(src) == "favicon.ico" {
 			hashName = false
 		}
 		switch filepath.Ext(pth) {
