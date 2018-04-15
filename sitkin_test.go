@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +43,50 @@ func TestNiceDuration(t *testing.T) {
 	}
 }
 
+func TestCopyDir(t *testing.T) {
+	td := newTempDir(t)
+	defer td.remove()
+
+	var s sitkin
+
+	td.writeFile("d1/a.html", "a")
+	td.writeFile("d1/b.js", "b")
+	td.writeFile("d1/x/c.css", "c")
+	td.writeFile("d1/x/y/d.txt", "d")
+	td.writeFile("d1/x/y/e", "e")
+	td.writeFile("d1/x/y/z/f.html", "f")
+
+	hashed, err := s.copyFiles(td.path("d2"), td.path("d1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bjs := "d2/b-" + hashHex("b") + ".js"
+	ccss := "d2/x/c-" + hashHex("c") + ".css"
+	dtxt := "d2/x/y/d-" + hashHex("d") + ".txt"
+
+	td.checkFile("d2/a.html", "a")
+	td.checkFile(bjs, "b")
+	td.checkFile(ccss, "c")
+	td.checkFile(dtxt, "d")
+	td.checkFile("d2/x/y/e", "e")
+	td.checkFile("d2/x/y/z/f.html", "f")
+
+	want := map[string]string{
+		td.path("d1/b.js"):      td.path(bjs),
+		td.path("d1/x/c.css"):   td.path(ccss),
+		td.path("d1/x/y/d.txt"): td.path(dtxt),
+	}
+	if !reflect.DeepEqual(hashed, want) {
+		t.Errorf("hashed: got %v; want %v", hashed, want)
+	}
+}
+
+func hashHex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:12])
+}
+
 func TestSitkin(t *testing.T) {
 	td := newTempDir(t)
 	defer td.remove()
@@ -46,6 +94,9 @@ func TestSitkin(t *testing.T) {
 	td.writeFile(
 		"sitkin/default.tmpl",
 		`<html>
+<head>
+<link href="/assets/css/x.css" rel="stylesheet">
+</head>
 <body>
 {{block "contents" .}}
 {{.Contents}}
@@ -84,9 +135,9 @@ func TestSitkin(t *testing.T) {
 `)
 	td.writeFile("about.md", "# About\n\nabc")
 	td.writeFile("foo.html", "<p>foo</p>")
-	td.writeFile("assets/css/x.css", "not actually css")
+	td.writeFile("assets/css/x.css", "css text")
 
-	s, err := load(td.dir, false)
+	s, err := load(td.dir, false, false)
 	if err != nil {
 		t.Fatal("load failed:", err)
 	}
@@ -94,52 +145,21 @@ func TestSitkin(t *testing.T) {
 		t.Fatal("render failed:", err)
 	}
 
+	cssLink := "/assets/css/x-" + hashHex("css text") + ".css"
 	td.checkFile(
 		"gen/posts/hello-world.html",
-		`<html>
-<body>
-
-Hello World
-<h1>Hello World</h1>
-
-<p>123</p>
-
-
-</body>
-</html>
-`,
+		"<link href="+cssLink+" rel=stylesheet>Hello World<h1>Hello World</h1><p>123",
 	)
 	td.checkFile(
 		"gen/index.html",
-		`<html>
-<body>
-
-<ol>
-
-<li>Hello World</li>
-
-</ol>
-
-</body>
-</html>
-`,
+		"<link href="+cssLink+" rel=stylesheet><ol><li>Hello World</ol>",
 	)
 	td.checkFile(
 		"gen/about.html",
-		`<html>
-<body>
-
-<h1>About</h1>
-
-<p>abc</p>
-
-
-</body>
-</html>
-`,
+		"<link href="+cssLink+" rel=stylesheet><h1>About</h1><p>abc",
 	)
 	td.checkFile("gen/foo.html", "<p>foo</p>")
-	td.writeFile("gen/assets/css/x.css", "not actually css")
+	td.checkFile("gen/assets/css/x-"+hashHex("css text")+".css", "css text")
 }
 
 type tempDir struct {
@@ -160,7 +180,7 @@ func newTempDir(t *testing.T) tempDir {
 
 func (td tempDir) remove() {
 	td.t.Helper()
-	if filepath.Base(td.dir) == goTestTempDir() {
+	if filepath.Dir(td.dir) == goTestTempDir() {
 		// Let go test clean this up.
 		return
 	}
@@ -169,9 +189,13 @@ func (td tempDir) remove() {
 	}
 }
 
+func (td tempDir) path(name string) string {
+	return filepath.Join(td.dir, name)
+}
+
 func (td tempDir) writeFile(name, contents string) {
 	td.t.Helper()
-	pth := filepath.Join(td.dir, name)
+	pth := td.path(name)
 	if err := os.MkdirAll(filepath.Dir(pth), 0755); err != nil {
 		td.t.Fatal(err)
 	}
@@ -182,7 +206,7 @@ func (td tempDir) writeFile(name, contents string) {
 
 func (td tempDir) checkFile(name, contents string) {
 	td.t.Helper()
-	b, err := ioutil.ReadFile(filepath.Join(td.dir, name))
+	b, err := ioutil.ReadFile(td.path(name))
 	if err != nil {
 		td.t.Error(err)
 		return
@@ -193,13 +217,18 @@ func (td tempDir) checkFile(name, contents string) {
 }
 
 func goTestTempDir() string {
-	exe, err := os.Executable()
-	if err != nil {
+	main := os.Args[0]
+	if !strings.HasPrefix(main, os.TempDir()) {
 		return ""
 	}
-	dir := filepath.Dir(exe)
-	if filepath.Base(dir) == "_test" {
-		return dir
+	if !strings.HasSuffix(main, ".test") {
+		return ""
+	}
+	dir := filepath.Dir(main)
+	for d := dir; len(d) > 1; d = filepath.Dir(d) {
+		if strings.HasPrefix(filepath.Base(d), "go-build") {
+			return dir
+		}
 	}
 	return ""
 }

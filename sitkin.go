@@ -2,30 +2,42 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"hash"
 	"html/template"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/cespare/cp"
 	"github.com/cespare/fswatch"
+	"github.com/tdewolff/minify"
+	minifyhtml "github.com/tdewolff/minify/html"
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 	"gopkg.in/russross/blackfriday.v2"
 )
 
 type sitkin struct {
-	dir           string
+	dir     string
+	devMode bool
+	verbose bool
+
 	templates     map[string]*template.Template
 	fileSets      []*fileSet
 	templateFiles []*templateFile
@@ -35,7 +47,7 @@ type sitkin struct {
 	ctx *context
 }
 
-func load(dir string, devMode bool) (*sitkin, error) {
+func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	// Initial sanity check.
 	sitkinDir := filepath.Join(dir, "sitkin")
 	stat, err := os.Stat(sitkinDir)
@@ -60,7 +72,9 @@ func load(dir string, devMode bool) (*sitkin, error) {
 		return nil, fmt.Errorf("error listing templates: %s", err)
 	}
 	s := &sitkin{
-		dir: dir,
+		dir:     dir,
+		devMode: devMode,
+		verbose: verbose,
 		templates: map[string]*template.Template{
 			"default": defaultTmpl,
 		},
@@ -293,45 +307,166 @@ func (s *sitkin) render() error {
 		return fmt.Errorf("cannot create gen dir: %s", err)
 	}
 
+	// Copy assets.
+	hashAssets := make(map[string]string) // "/styles/x.css" -> "/styles/x-asdf123.css"
+	toURLPath := func(baseDir, pth string) string {
+		rel, err := filepath.Rel(baseDir, pth)
+		if err != nil {
+			panic(err)
+		}
+		return "/" + filepath.ToSlash(rel)
+	}
+	for _, name := range s.forCopy {
+		src := filepath.Join(s.dir, name)
+		dst := filepath.Join(genDir, name)
+		hashed, err := s.copyFiles(dst, src)
+		if err != nil {
+			return err
+		}
+		for from, to := range hashed {
+			hashAssets[toURLPath(s.dir, from)] = toURLPath(genDir, to)
+		}
+	}
+	if s.verbose {
+		log.Println("Hashed assets:")
+		var keys []string
+		for k := range hashAssets {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			log.Printf("  %s -> %s", k, hashAssets[k])
+		}
+	}
+
 	// Render file sets.
 	for _, fs := range s.fileSets {
-		if err := s.renderFileSet(fs); err != nil {
+		if err := s.renderFileSet(fs, hashAssets); err != nil {
 			return fmt.Errorf("error rendering file set %q: %s", fs.name, err)
 		}
 	}
 
 	// Render top-level templates.
 	for _, tf := range s.templateFiles {
-		if err := s.renderTemplate(tf); err != nil {
+		if err := s.renderTemplate(tf, hashAssets); err != nil {
 			return fmt.Errorf("error rendering template %q: %s", tf.name, err)
 		}
 	}
 
 	// Render top-level markdown files.
 	for _, md := range s.markdownFiles {
-		if err := s.renderMarkdown(md); err != nil {
+		if err := s.renderMarkdown(md, hashAssets); err != nil {
 			return fmt.Errorf("error rendering markdown file %q: %s", md.name, err)
 		}
 	}
 
-	// Copy remaining files.
-	for _, name := range s.forCopy {
-		src := filepath.Join(s.dir, name)
-		dst := filepath.Join(genDir, name)
-		if err := cp.CopyAll(dst, src); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-func (s *sitkin) renderFileSet(fs *fileSet) error {
+func (s *sitkin) copyFiles(dst, src string) (map[string]string, error) {
+	walk, hashed := s.copyWalk(dst, src)
+	return hashed, filepath.Walk(src, walk)
+}
+
+func (s *sitkin) copyWalk(dst, src string) (filepath.WalkFunc, map[string]string) {
+	hashed := make(map[string]string)
+	walk := func(pth string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relpath, err := filepath.Rel(src, pth)
+		if err != nil {
+			panic(err) // shouldn't happen?
+		}
+		target := filepath.Join(dst, relpath)
+		if info.IsDir() {
+			return os.Mkdir(target, info.Mode())
+		}
+		hashName := !s.devMode
+		if src == "favicon.ico" {
+			hashName = false
+		}
+		switch filepath.Ext(pth) {
+		case ".html", "":
+			hashName = false
+		}
+		dstPath, err := copyFile(filepath.Dir(target), pth, hashName)
+		if err != nil {
+			return err
+		}
+		if hashName {
+			hashed[pth] = dstPath
+		}
+		return nil
+	}
+	return walk, hashed
+}
+
+func copyFile(dstDir, src string, hashName bool) (string, error) {
+	rf, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer rf.Close()
+	rstat, err := rf.Stat()
+	if err != nil {
+		return "", err
+	}
+	if rstat.IsDir() {
+		return "", errors.New("copyFile called on a directory")
+	}
+
+	base := filepath.Base(src)
+	tmp, err := tempFile(dstDir, base, rstat.Mode())
+	if err != nil {
+		return "", err
+	}
+	var w io.Writer = tmp
+	var h hash.Hash
+	if hashName {
+		h = sha256.New()
+		w = io.MultiWriter(tmp, h)
+	}
+	if _, err := io.Copy(w, rf); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if hashName {
+		ext := path.Ext(base)
+		prefix := strings.TrimSuffix(base, ext)
+		hashStr := hex.EncodeToString(h.Sum(nil)[:12])
+		base = prefix + "-" + hashStr + ext
+	}
+	dst := filepath.Join(dstDir, base)
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+func tempFile(dir, prefix string, mode os.FileMode) (*os.File, error) {
+	const numAttempts = 1000
+	for i := 0; i < numAttempts; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("%s.tmp.%d", prefix, i))
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if os.IsExist(err) {
+			continue
+		}
+		return f, err
+	}
+	return nil, fmt.Errorf("could not create temp file after %d attempts", numAttempts)
+}
+
+func (s *sitkin) renderFileSet(fs *fileSet, hashAssets map[string]string) error {
 	dir := filepath.Join(s.dir, "gen", fs.name)
 	if err := os.Mkdir(dir, 0755); err != nil {
 		return err
 	}
 	for _, md := range fs.files {
-		if err := s.renderFileSetMarkdown(dir, md); err != nil {
+		if err := s.renderFileSetMarkdown(dir, md, hashAssets); err != nil {
 			return err
 		}
 	}
@@ -354,7 +489,7 @@ type fileContext struct {
 	Metadata map[string]interface{}
 }
 
-func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile) error {
+func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile, hashAssets map[string]string) error {
 	f, err := os.Create(filepath.Join(dir, md.name+".html"))
 	if err != nil {
 		return err
@@ -371,25 +506,33 @@ func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile) error {
 		Date:     md.date,
 		Metadata: md.metadata,
 	}
-	if err := md.tmpl.Execute(f, ctx); err != nil {
+	var buf bytes.Buffer
+	if err := md.tmpl.Execute(&buf, ctx); err != nil {
 		return err
+	}
+	if err := rewriteLinksAndMinify(f, &buf, hashAssets); err != nil {
+		return fmt.Errorf("error rewriting hashed asset links: %s", err)
 	}
 	return f.Close()
 }
 
-func (s *sitkin) renderTemplate(tf *templateFile) error {
+func (s *sitkin) renderTemplate(tf *templateFile, hashAssets map[string]string) error {
 	f, err := os.Create(filepath.Join(s.dir, "gen", tf.name+".html"))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err := tf.tmpl.Execute(f, s.ctx); err != nil {
+	var buf bytes.Buffer
+	if err := tf.tmpl.Execute(&buf, s.ctx); err != nil {
 		return err
+	}
+	if err := rewriteLinksAndMinify(f, &buf, hashAssets); err != nil {
+		return fmt.Errorf("error rewriting hashed asset links: %s", err)
 	}
 	return f.Close()
 }
 
-func (s *sitkin) renderMarkdown(md *markdownFile) error {
+func (s *sitkin) renderMarkdown(md *markdownFile, hashAssets map[string]string) error {
 	f, err := os.Create(filepath.Join(s.dir, "gen", md.name+".html"))
 	if err != nil {
 		return err
@@ -402,16 +545,88 @@ func (s *sitkin) renderMarkdown(md *markdownFile) error {
 		context:  s.ctx,
 		Contents: template.HTML(blackfriday.Run(md.contents)),
 	}
-	if err := md.tmpl.Execute(f, ctx); err != nil {
+	var buf bytes.Buffer
+	if err := md.tmpl.Execute(&buf, ctx); err != nil {
 		return err
 	}
+	if err := rewriteLinksAndMinify(f, &buf, hashAssets); err != nil {
+		return fmt.Errorf("error rewriting hashed asset links: %s", err)
+	}
 	return f.Close()
+}
+
+var defaultMinify = minify.New()
+
+func rewriteLinksAndMinify(w io.Writer, r io.Reader, hashAssets map[string]string) error {
+	doc, err := html.Parse(r)
+	if err != nil {
+		return err
+	}
+	rewriteAssetLinks(doc, hashAssets)
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		err := html.Render(pw, doc)
+		pw.CloseWithError(err)
+		close(done)
+	}()
+	if err := minifyhtml.Minify(defaultMinify, w, pr, nil); err != nil {
+		io.Copy(ioutil.Discard, pr)
+		<-done
+		return err
+	}
+	return nil
+}
+
+func rewriteAssetLinks(node *html.Node, hashAssets map[string]string) {
+	rewriteTag(node, hashAssets)
+	for n := node.FirstChild; n != nil; n = n.NextSibling {
+		rewriteAssetLinks(n, hashAssets)
+	}
+}
+
+func rewriteTag(node *html.Node, hashAssets map[string]string) {
+	if node.Type != html.ElementNode {
+		return
+	}
+	switch node.DataAtom {
+	case atom.Img:
+		rewriteAttr(node.Attr, "src", hashAssets)
+	case atom.Link:
+		rewriteAttr(node.Attr, "href", hashAssets)
+	case atom.Script:
+		rewriteAttr(node.Attr, "src", hashAssets)
+	}
+}
+
+func rewriteAttr(attrs []html.Attribute, name string, hashAssets map[string]string) {
+	for i := range attrs {
+		attr := &attrs[i]
+		if attr.Namespace != "" || attr.Key != name {
+			continue
+		}
+		u, err := url.Parse(attr.Val)
+		if err != nil {
+			continue
+		}
+		if u.Host != "" {
+			continue
+		}
+		if !strings.HasPrefix(u.Path, "/") {
+			log.Printf("Warning: non-absolute local paths aren't handled (%s)", attr.Val)
+			continue
+		}
+		if hashed, ok := hashAssets[u.Path]; ok {
+			attr.Val = hashed
+		}
+	}
 }
 
 func main() {
 	log.SetFlags(0)
 	devAddr := flag.String("devaddr", "", `If given, operate in dev mode: serve at this HTTP address,
 open it in a browser window, and rebuild files when they change`)
+	verbose := flag.Bool("v", false, "Verbose mode")
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, `Usage:
 
@@ -439,13 +654,13 @@ If dir is not given, then the current directory is used.
 	}
 
 	if *devAddr == "" {
-		build(dir, false)
+		build(dir, false, *verbose)
 		return
 	}
 
 	// Dev mode. Serve HTTP, open up a browser window, rebuild files on change.
 	// Start by building once, synchronously.
-	build(dir, true)
+	build(dir, true, *verbose)
 
 	go func() {
 		events, errs, err := fswatch.Watch(dir, 500*time.Millisecond, "gen")
@@ -457,7 +672,7 @@ If dir is not given, then the current directory is used.
 			log.Fatalln("Error watching project dir for changes:", err)
 		}()
 		for range events {
-			build(dir, true)
+			build(dir, true, *verbose)
 		}
 	}()
 
@@ -497,9 +712,9 @@ If dir is not given, then the current directory is used.
 
 }
 
-func build(dir string, devMode bool) {
+func build(dir string, devMode, verbose bool) {
 	start := time.Now()
-	s, err := load(dir, devMode)
+	s, err := load(dir, devMode, verbose)
 	if err != nil {
 		log.Println("Error loading sitkin project:", err)
 		if !devMode {
