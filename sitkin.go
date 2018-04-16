@@ -30,19 +30,24 @@ import (
 	minifyhtml "github.com/tdewolff/minify/html"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
-	"gopkg.in/russross/blackfriday.v2"
+	blackfriday "gopkg.in/russross/blackfriday.v2"
 )
 
 type sitkin struct {
 	dir     string
 	devMode bool
 	verbose bool
+	config  struct {
+		Ignore   []string
+		NoHash   []string
+		FileSets []string
+	}
 
 	templates     map[string]*template.Template
 	fileSets      []*fileSet
 	templateFiles []*templateFile
 	markdownFiles []*markdownFile
-	forCopy       []string // files/dirs to copy directly (basename only)
+	copyFiles     []*copyFile
 
 	ctx *context
 }
@@ -61,6 +66,39 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 		return nil, fmt.Errorf("%s/sitkin is not a directory", dir)
 	}
 
+	s := &sitkin{
+		dir:       dir,
+		devMode:   devMode,
+		verbose:   verbose,
+		templates: make(map[string]*template.Template),
+		ctx: &context{
+			DevMode:  devMode,
+			FileSets: make(map[string]*fileSetContext),
+		},
+	}
+
+	// Load config file, if it exists.
+	f, err := os.Open(filepath.Join(sitkinDir, "config.json"))
+	if err == nil {
+		err := json.NewDecoder(f).Decode(&s.config)
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("error loading config.json: %s", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	for _, glob := range s.config.Ignore {
+		if _, err := path.Match(glob, ""); err != nil {
+			return nil, fmt.Errorf("bad ignore glob %q: %s", glob, err)
+		}
+	}
+	for _, glob := range s.config.NoHash {
+		if _, err := path.Match(glob, ""); err != nil {
+			return nil, fmt.Errorf("bad nohash glob %q: %s", glob, err)
+		}
+	}
+
 	// Load templates.
 	defaultTmpl, err := template.ParseFiles(filepath.Join(sitkinDir, "default.tmpl"))
 	if err != nil {
@@ -71,18 +109,7 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error listing templates: %s", err)
 	}
-	s := &sitkin{
-		dir:     dir,
-		devMode: devMode,
-		verbose: verbose,
-		templates: map[string]*template.Template{
-			"default": defaultTmpl,
-		},
-		ctx: &context{
-			DevMode:  devMode,
-			FileSets: make(map[string]*fileSetContext),
-		},
-	}
+	s.templates["default"] = defaultTmpl
 	unusedTemplates := make(map[string]struct{})
 	for _, name := range tmplFiles {
 		tmplName := strings.TrimSuffix(filepath.Base(name), ".tmpl")
@@ -97,28 +124,46 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 		unusedTemplates[tmplName] = struct{}{}
 	}
 
+	// Load the file sets.
+	for _, name := range s.config.FileSets {
+		tmpl, ok := s.templates[name]
+		if !ok {
+			return nil, fmt.Errorf("no template for file set %s", name)
+		}
+		fsDir := filepath.Join(dir, name)
+		fs, err := s.loadFileSet(fsDir, tmpl)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("no directory for file set %s", name)
+			}
+			return nil, err
+		}
+		s.fileSets = append(s.fileSets, fs)
+		delete(unusedTemplates, name)
+	}
+
+	isFileSetName := func(name string) bool {
+		for _, n := range s.config.FileSets {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Categorize all the rest of the files in the project.
 	fis, err := ioutil.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("error reading files in project dir: %s", err)
 	}
 	for _, fi := range fis {
-		name := fi.Name()
+		name := fi.Name() // basename, since fi came from readdir
 		switch {
-		case name == "sitkin" || name == "gen" || strings.HasPrefix(name, "."):
+		case name == "sitkin" ||
+			name == "gen" ||
+			strings.HasPrefix(name, ".") ||
+			isFileSetName(name):
 			// Don't copy these.
-		case fi.IsDir():
-			if tmpl, ok := s.templates[name]; ok {
-				fsDir := filepath.Join(dir, name)
-				fs, err := s.loadFileSet(fsDir, tmpl)
-				if err != nil {
-					return nil, fmt.Errorf("error loading file set %s: %s", fsDir, err)
-				}
-				s.fileSets = append(s.fileSets, fs)
-				delete(unusedTemplates, name)
-			} else {
-				s.forCopy = append(s.forCopy, name)
-			}
 		case strings.HasSuffix(name, ".tmpl"):
 			tmpl, err := s.parseTemplateFile(filepath.Join(dir, name))
 			if err != nil {
@@ -143,7 +188,11 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 			}
 			s.markdownFiles = append(s.markdownFiles, md)
 		default:
-			s.forCopy = append(s.forCopy, name)
+			copyFiles, err := s.loadCopyFiles(dir, name)
+			if err != nil {
+				return nil, fmt.Errorf("error loading files to copy from %s: %s", name, err)
+			}
+			s.copyFiles = append(s.copyFiles, copyFiles...)
 		}
 	}
 
@@ -204,7 +253,7 @@ func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, err
 	names := make(map[string]struct{})
 	var files []*markdownFile
 	for _, fi := range fis {
-		name := fi.Name()
+		name := fi.Name() // basename only, since this comes from readdir
 		pth := filepath.Join(dir, name)
 		if fi.IsDir() {
 			log.Println("Warning: ignoring unexpected dir", pth)
@@ -295,6 +344,127 @@ func (s *sitkin) loadMarkdownFile(name string, tmpl *template.Template) (*markdo
 	}, nil
 }
 
+type copyFile struct {
+	path     string // relative to source/dest dir
+	hashName bool
+}
+
+func (s *sitkin) loadCopyFiles(dir, name string) ([]*copyFile, error) {
+	var copyFiles []*copyFile
+	walk := func(pth string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relpath, err := filepath.Rel(dir, pth)
+		if err != nil {
+			panic(err) // shouldn't happen
+		}
+		for _, glob := range s.config.Ignore {
+			match, err := path.Match(glob, filepath.ToSlash(relpath))
+			if err != nil {
+				panic(err)
+			}
+			if match {
+				if fi.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if fi.IsDir() {
+			return nil
+		}
+		cf := &copyFile{
+			path:     relpath,
+			hashName: !s.devMode,
+		}
+		switch filepath.Ext(pth) {
+		case ".html", "":
+			cf.hashName = false
+		}
+		for _, glob := range s.config.NoHash {
+			match, err := path.Match(glob, filepath.ToSlash(relpath))
+			if err != nil {
+				panic(err) // already checked
+			}
+			if match {
+				cf.hashName = false
+				break
+			}
+		}
+		copyFiles = append(copyFiles, cf)
+		return nil
+	}
+	if err := filepath.Walk(filepath.Join(dir, name), walk); err != nil {
+		return nil, err
+	}
+	return copyFiles, nil
+}
+
+func (cf *copyFile) copy(srcDir, dstDir string) (relDst string, err error) {
+	src := filepath.Join(srcDir, cf.path)
+	f, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	base := filepath.Base(cf.path)
+	parent := filepath.Dir(filepath.Join(dstDir, cf.path))
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return "", err
+	}
+	tmp, err := tempFile(parent, base, stat.Mode())
+	if err != nil {
+		return "", err
+	}
+	var w io.Writer = tmp
+	var h hash.Hash
+	if cf.hashName {
+		h = sha256.New()
+		w = io.MultiWriter(tmp, h)
+	}
+	if _, err := io.Copy(w, f); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if cf.hashName {
+		ext := path.Ext(base)
+		prefix := strings.TrimSuffix(base, ext)
+		hashStr := hex.EncodeToString(h.Sum(nil)[:12])
+		base = prefix + "." + hashStr + ext
+	}
+	dst := filepath.Join(parent, base)
+	if err = os.Rename(tmp.Name(), dst); err != nil {
+		return "", err
+	}
+	relDst, err = filepath.Rel(dstDir, dst)
+	if err != nil {
+		panic(err)
+	}
+	return relDst, nil
+}
+
+func tempFile(dir, prefix string, mode os.FileMode) (*os.File, error) {
+	const numAttempts = 1000
+	for i := 0; i < numAttempts; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("%s.tmp.%d", prefix, i))
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if os.IsExist(err) {
+			continue
+		}
+		return f, err
+	}
+	return nil, fmt.Errorf("could not create temp file after %d attempts", numAttempts)
+}
+
 func (s *sitkin) render() error {
 	// Delete and recreate the gen dir.
 	genDir := filepath.Join(s.dir, "gen")
@@ -309,23 +479,15 @@ func (s *sitkin) render() error {
 
 	// Copy assets.
 	hashAssets := make(map[string]string) // "/styles/x.css" -> "/styles/x.asdf123.css"
-	toURLPath := func(baseDir, pth string) string {
-		rel, err := filepath.Rel(baseDir, pth)
-		if err != nil {
-			panic(err)
-		}
+	toURLPath := func(rel string) string {
 		return "/" + filepath.ToSlash(rel)
 	}
-	for _, name := range s.forCopy {
-		src := filepath.Join(s.dir, name)
-		dst := filepath.Join(genDir, name)
-		hashed, err := s.copyFiles(dst, src)
+	for _, cf := range s.copyFiles {
+		relDst, err := cf.copy(s.dir, genDir)
 		if err != nil {
 			return err
 		}
-		for from, to := range hashed {
-			hashAssets[toURLPath(s.dir, from)] = toURLPath(genDir, to)
-		}
+		hashAssets[toURLPath(cf.path)] = toURLPath(relDst)
 	}
 	if s.verbose {
 		log.Println("Hashed assets:")
@@ -361,103 +523,6 @@ func (s *sitkin) render() error {
 	}
 
 	return nil
-}
-
-func (s *sitkin) copyFiles(dst, src string) (map[string]string, error) {
-	walk, hashed := s.copyWalk(dst, src)
-	return hashed, filepath.Walk(src, walk)
-}
-
-func (s *sitkin) copyWalk(dst, src string) (filepath.WalkFunc, map[string]string) {
-	hashed := make(map[string]string)
-	walk := func(pth string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		relpath, err := filepath.Rel(src, pth)
-		if err != nil {
-			panic(err) // shouldn't happen?
-		}
-		target := filepath.Join(dst, relpath)
-		if info.IsDir() {
-			return os.Mkdir(target, info.Mode())
-		}
-		hashName := !s.devMode
-		if filepath.Base(src) == "favicon.ico" {
-			hashName = false
-		}
-		switch filepath.Ext(pth) {
-		case ".html", "":
-			hashName = false
-		}
-		dstPath, err := copyFile(filepath.Dir(target), pth, hashName)
-		if err != nil {
-			return err
-		}
-		if hashName {
-			hashed[pth] = dstPath
-		}
-		return nil
-	}
-	return walk, hashed
-}
-
-func copyFile(dstDir, src string, hashName bool) (string, error) {
-	rf, err := os.Open(src)
-	if err != nil {
-		return "", err
-	}
-	defer rf.Close()
-	rstat, err := rf.Stat()
-	if err != nil {
-		return "", err
-	}
-	if rstat.IsDir() {
-		return "", errors.New("copyFile called on a directory")
-	}
-
-	base := filepath.Base(src)
-	tmp, err := tempFile(dstDir, base, rstat.Mode())
-	if err != nil {
-		return "", err
-	}
-	var w io.Writer = tmp
-	var h hash.Hash
-	if hashName {
-		h = sha256.New()
-		w = io.MultiWriter(tmp, h)
-	}
-	if _, err := io.Copy(w, rf); err != nil {
-		tmp.Close()
-		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if hashName {
-		ext := path.Ext(base)
-		prefix := strings.TrimSuffix(base, ext)
-		hashStr := hex.EncodeToString(h.Sum(nil)[:12])
-		base = prefix + "." + hashStr + ext
-	}
-	dst := filepath.Join(dstDir, base)
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return "", err
-	}
-	return dst, nil
-}
-
-func tempFile(dir, prefix string, mode os.FileMode) (*os.File, error) {
-	const numAttempts = 1000
-	for i := 0; i < numAttempts; i++ {
-		name := filepath.Join(dir, fmt.Sprintf("%s.tmp.%d", prefix, i))
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-		if os.IsExist(err) {
-			continue
-		}
-		return f, err
-	}
-	return nil, fmt.Errorf("could not create temp file after %d attempts", numAttempts)
 }
 
 func (s *sitkin) renderFileSet(fs *fileSet, hashAssets map[string]string) error {

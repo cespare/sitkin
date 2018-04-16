@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kr/pretty"
 )
 
 func TestNiceDuration(t *testing.T) {
@@ -43,43 +45,95 @@ func TestNiceDuration(t *testing.T) {
 	}
 }
 
-func TestCopyDir(t *testing.T) {
+func TestCopyFiles(t *testing.T) {
 	td := newTempDir(t)
 	defer td.remove()
 
 	var s sitkin
+	s.config.Ignore = []string{"*.sh"}
+	s.config.NoHash = []string{"favicon.ico", "x/y/d.txt"}
 
+	td.writeFile("d1/favicon.ico", "favicon")
 	td.writeFile("d1/a.html", "a")
 	td.writeFile("d1/b.js", "b")
 	td.writeFile("d1/x/c.css", "c")
 	td.writeFile("d1/x/y/d.txt", "d")
 	td.writeFile("d1/x/y/e", "e")
 	td.writeFile("d1/x/y/z/f.html", "f")
+	td.writeFile("d1/g.sh", "g")
 
-	hashed, err := s.copyFiles(td.path("d2"), td.path("d1"))
-	if err != nil {
-		t.Fatal(err)
+	var files []*copyFile
+	for _, tt := range []struct {
+		name string
+		want []*copyFile
+	}{
+		{
+			name: "favicon.ico",
+			want: []*copyFile{{path: "favicon.ico"}},
+		},
+		{
+			name: "a.html",
+			want: []*copyFile{{path: "a.html"}},
+		},
+		{
+			name: "b.js",
+			want: []*copyFile{{path: "b.js", hashName: true}},
+		},
+		{
+			name: "x",
+			want: []*copyFile{
+				{path: "x/c.css", hashName: true},
+				{path: "x/y/d.txt"},
+				{path: "x/y/e"},
+				{path: "x/y/z/f.html"},
+			},
+		},
+		{
+			name: "g.sh",
+			want: nil,
+		},
+	} {
+		got, err := s.loadCopyFiles(td.path("d1"), tt.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("load %s: got\n\n%s\n\nwant\n\n%s",
+				tt.name, pretty.Sprint(got), pretty.Sprint(tt.want))
+		}
+		files = append(files, got...)
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 
-	bjs := "d2/b." + hashHex("b") + ".js"
-	ccss := "d2/x/c." + hashHex("c") + ".css"
-	dtxt := "d2/x/y/d." + hashHex("d") + ".txt"
+	bjs := "b." + hashHex("b") + ".js"
+	ccss := "x/c." + hashHex("c") + ".css"
 
+	for i, want := range []string{
+		"favicon.ico",
+		"a.html",
+		bjs,
+		ccss,
+		"x/y/d.txt",
+		"x/y/e",
+	} {
+		cf := files[i]
+		got, err := cf.copy(td.path("d1"), td.path("d2"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("copy %s: got relDst %s; want %s", cf.path, got, want)
+		}
+	}
+
+	td.checkFile("d2/favicon.ico", "favicon")
 	td.checkFile("d2/a.html", "a")
-	td.checkFile(bjs, "b")
-	td.checkFile(ccss, "c")
-	td.checkFile(dtxt, "d")
+	td.checkFile("d2/"+bjs, "b")
+	td.checkFile("d2/"+ccss, "c")
+	td.checkFile("d2/x/y/d.txt", "d")
 	td.checkFile("d2/x/y/e", "e")
-	td.checkFile("d2/x/y/z/f.html", "f")
-
-	want := map[string]string{
-		td.path("d1/b.js"):      td.path(bjs),
-		td.path("d1/x/c.css"):   td.path(ccss),
-		td.path("d1/x/y/d.txt"): td.path(dtxt),
-	}
-	if !reflect.DeepEqual(hashed, want) {
-		t.Errorf("hashed: got %v; want %v", hashed, want)
-	}
 }
 
 func hashHex(s string) string {
@@ -91,6 +145,14 @@ func TestSitkin(t *testing.T) {
 	td := newTempDir(t)
 	defer td.remove()
 
+	td.writeFile(
+		"sitkin/config.json",
+		`{
+  "ignore": ["*.ignore"],
+  "nohash": ["favicon.ico"],
+  "filesets": ["posts"]
+}`,
+	)
 	td.writeFile(
 		"sitkin/default.tmpl",
 		`<html>
@@ -136,6 +198,8 @@ func TestSitkin(t *testing.T) {
 	td.writeFile("about.md", "# About\n\nabc")
 	td.writeFile("foo.html", "<p>foo</p>")
 	td.writeFile("assets/css/x.css", "css text")
+	td.writeFile("x.ignore", "ignore me")
+	td.writeFile("favicon.ico", "favicon")
 
 	s, err := load(td.dir, false, false)
 	if err != nil {
@@ -160,6 +224,8 @@ func TestSitkin(t *testing.T) {
 	)
 	td.checkFile("gen/foo.html", "<p>foo</p>")
 	td.checkFile("gen/assets/css/x."+hashHex("css text")+".css", "css text")
+	td.checkNotExist("gen/x.ignore")
+	td.checkFile("gen/favicon.ico", "favicon")
 }
 
 type tempDir struct {
@@ -213,6 +279,18 @@ func (td tempDir) checkFile(name, contents string) {
 	}
 	if got := string(b); got != contents {
 		td.t.Errorf("for %s: got contents\n\n%s\n\nwant:\n\n%s\n", name, got, contents)
+	}
+}
+
+func (td tempDir) checkNotExist(name string) {
+	td.t.Helper()
+	_, err := os.Stat(td.path(name))
+	if err == nil {
+		td.t.Errorf("%s exists; expected not to", name)
+		return
+	}
+	if !os.IsNotExist(err) {
+		td.t.Error(err)
 	}
 }
 
