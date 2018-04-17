@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -75,7 +76,7 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 		templates: make(map[string]*template.Template),
 		ctx: &context{
 			DevMode:  devMode,
-			FileSets: make(map[string]*fileSetContext),
+			FileSets: make(map[string]*fileSet),
 		},
 	}
 
@@ -102,11 +103,10 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	}
 
 	// Load templates.
-	defaultTmpl, err := template.ParseFiles(filepath.Join(sitkinDir, "default.tmpl"))
+	defaultTmpl, err := parseTemplateFile(filepath.Join(sitkinDir, "default.tmpl"))
 	if err != nil {
 		return nil, fmt.Errorf("error loading default template: %s", err)
 	}
-	defaultTmpl = defaultTmpl.Option("missingkey=error")
 	tmplFiles, err := filepath.Glob(filepath.Join(sitkinDir, "*.tmpl"))
 	if err != nil {
 		return nil, fmt.Errorf("error listing templates: %s", err)
@@ -177,11 +177,10 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 			}
 			s.templateFiles = append(s.templateFiles, tf)
 		case strings.HasSuffix(name, ".tpl"):
-			tmpl, err := texttemplate.ParseFiles(filepath.Join(dir, name))
+			tmpl, err := parseTextTemplateFile(filepath.Join(dir, name))
 			if err != nil {
 				return nil, fmt.Errorf("error loading text template %s: %s", name, err)
 			}
-			tmpl = tmpl.Option("missingkey=error")
 			ttf := &textTemplateFile{
 				name: strings.TrimSuffix(filepath.Base(name), ".tpl"),
 				tmpl: tmpl,
@@ -218,20 +217,41 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 		log.Println("Warning: the following templates are not used:", unused)
 	}
 
-	// Fill in fileSetContexts.
+	// Fill in context.
 	for _, fs := range s.fileSets {
-		var fsctx fileSetContext
-		for _, mf := range fs.files {
-			fsctx.Files = append(fsctx.Files, &fileContext{
-				Name:     mf.name,
-				Date:     mf.date,
-				Metadata: mf.metadata,
-			})
-		}
-		s.ctx.FileSets[fs.name] = &fsctx
+		s.ctx.FileSets[fs.name] = fs
 	}
 
 	return s, nil
+}
+
+var tmplFuncs = template.FuncMap{
+	"formatRFC3339": func(t time.Time) string { return t.Format(time.RFC3339) },
+	"xmlEscape": func(b template.HTML) (string, error) {
+		var buf strings.Builder
+		if err := xml.EscapeText(&buf, []byte(b)); err != nil {
+			return "", err
+		}
+		return buf.String(), nil
+	},
+}
+
+func parseTemplateFile(name string) (*template.Template, error) {
+	t, err := template.New("").Funcs(tmplFuncs).ParseFiles(name)
+	if err != nil {
+		return nil, err
+	}
+	return t.Lookup(filepath.Base(name)).Option("missingkey=error"), nil
+}
+
+var textTmplFuncs = texttemplate.FuncMap(tmplFuncs)
+
+func parseTextTemplateFile(name string) (*texttemplate.Template, error) {
+	t, err := texttemplate.New("").Funcs(textTmplFuncs).ParseFiles(name)
+	if err != nil {
+		return nil, err
+	}
+	return t.Lookup(filepath.Base(name)).Option("missingkey=error"), nil
 }
 
 func (s *sitkin) parseTemplateFile(name string) (*template.Template, error) {
@@ -239,23 +259,23 @@ func (s *sitkin) parseTemplateFile(name string) (*template.Template, error) {
 	if err != nil {
 		panic(err)
 	}
-	t = t.Option("missingkey=error")
 	return t.ParseFiles(name)
 }
 
 type fileSet struct {
-	name  string
-	files []*markdownFile
+	name     string
+	Files    []*markdownFile
+	LastDate time.Time
 }
 
 type markdownFile struct {
-	name     string
+	Name     string
 	tmpl     *template.Template
-	contents []byte
+	Contents template.HTML // rendered markdown
 
 	// The remaining fields are not used for top-level markdown files.
-	date     time.Time
-	metadata map[string]interface{}
+	Date     time.Time
+	Metadata map[string]interface{}
 }
 
 func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, error) {
@@ -286,16 +306,16 @@ func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, err
 			log.Printf("Warning: ignoring strangely-named file %s (invalid date %q)", pth, parts[0])
 			continue
 		}
-		metadata, contents, err := loadMarkdownMetadata(pth)
+		metadata, markdown, err := loadMarkdownMetadata(pth)
 		if err != nil {
 			return nil, fmt.Errorf("error loading markdown file %s: %s", pth, err)
 		}
 		md := &markdownFile{
-			name:     parts[1],
+			Name:     parts[1],
 			tmpl:     tmpl,
-			contents: contents,
-			date:     t,
-			metadata: metadata,
+			Contents: template.HTML(blackfriday.Run(markdown)),
+			Date:     t,
+			Metadata: metadata,
 		}
 		if _, ok := names[parts[1]]; ok {
 			return nil, fmt.Errorf("duplicate name (%s) in file set", parts[1])
@@ -304,15 +324,19 @@ func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, err
 		files = append(files, md)
 	}
 	sort.Slice(files, func(i, j int) bool {
-		return files[i].date.After(files[j].date)
+		return files[i].Date.After(files[j].Date)
 	})
-	return &fileSet{
+	fs := &fileSet{
 		name:  filepath.Base(dir),
-		files: files,
-	}, nil
+		Files: files,
+	}
+	if len(files) > 0 {
+		fs.LastDate = files[0].Date
+	}
+	return fs, nil
 }
 
-func loadMarkdownMetadata(pth string) (metadata map[string]interface{}, contents []byte, err error) {
+func loadMarkdownMetadata(pth string) (metadata map[string]interface{}, markdown []byte, err error) {
 	b, err := ioutil.ReadFile(pth)
 	if err != nil {
 		return nil, nil, err
@@ -356,9 +380,9 @@ func (s *sitkin) loadMarkdownFile(name string, tmpl *template.Template) (*markdo
 		return nil, err
 	}
 	return &markdownFile{
-		name:     strings.TrimSuffix(filepath.Base(name), ".md"),
+		Name:     strings.TrimSuffix(filepath.Base(name), ".md"),
 		tmpl:     tmpl,
-		contents: b,
+		Contents: template.HTML(blackfriday.Run(b)),
 	}, nil
 }
 
@@ -541,7 +565,7 @@ func (s *sitkin) render() error {
 	// Render top-level markdown files.
 	for _, md := range s.markdownFiles {
 		if err := s.renderMarkdown(md, hashAssets); err != nil {
-			return fmt.Errorf("error rendering markdown file %q: %s", md.name, err)
+			return fmt.Errorf("error rendering markdown file %q: %s", md.Name, err)
 		}
 	}
 
@@ -553,7 +577,7 @@ func (s *sitkin) renderFileSet(fs *fileSet, hashAssets map[string]string) error 
 	if err := os.Mkdir(dir, 0755); err != nil {
 		return err
 	}
-	for _, md := range fs.files {
+	for _, md := range fs.Files {
 		if err := s.renderFileSetMarkdown(dir, md, hashAssets); err != nil {
 			return err
 		}
@@ -564,35 +588,21 @@ func (s *sitkin) renderFileSet(fs *fileSet, hashAssets map[string]string) error 
 // context is the common context to all templates.
 type context struct {
 	DevMode  bool
-	FileSets map[string]*fileSetContext
-}
-
-type fileSetContext struct {
-	Files []*fileContext
-}
-
-type fileContext struct {
-	Name     string
-	Date     time.Time
-	Metadata map[string]interface{}
+	FileSets map[string]*fileSet
 }
 
 func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile, hashAssets map[string]string) error {
-	f, err := createFile(filepath.Join(dir, md.name+".html"))
+	f, err := createFile(filepath.Join(dir, md.Name+".html"))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	ctx := struct {
 		*context
-		Contents template.HTML
-		Date     time.Time
-		Metadata map[string]interface{}
+		*markdownFile
 	}{
-		context:  s.ctx,
-		Contents: template.HTML(blackfriday.Run(md.contents)),
-		Date:     md.date,
-		Metadata: md.metadata,
+		context:      s.ctx,
+		markdownFile: md,
 	}
 	var buf bytes.Buffer
 	if err := md.tmpl.Execute(&buf, ctx); err != nil {
@@ -633,17 +643,17 @@ func (s *sitkin) renderTextTemplate(ttf *textTemplateFile) error {
 }
 
 func (s *sitkin) renderMarkdown(md *markdownFile, hashAssets map[string]string) error {
-	f, err := createFile(filepath.Join(s.dir, "gen", md.name+".html"))
+	f, err := createFile(filepath.Join(s.dir, "gen", md.Name+".html"))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	ctx := struct {
 		*context
-		Contents template.HTML
+		*markdownFile
 	}{
-		context:  s.ctx,
-		Contents: template.HTML(blackfriday.Run(md.contents)),
+		context:      s.ctx,
+		markdownFile: md,
 	}
 	var buf bytes.Buffer
 	if err := md.tmpl.Execute(&buf, ctx); err != nil {
