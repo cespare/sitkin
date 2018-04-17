@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	texttemplate "text/template"
 	"time"
 
 	"github.com/cespare/fswatch"
@@ -43,11 +44,12 @@ type sitkin struct {
 		FileSets []string
 	}
 
-	templates     map[string]*template.Template
-	fileSets      []*fileSet
-	templateFiles []*templateFile
-	markdownFiles []*markdownFile
-	copyFiles     []*copyFile
+	templates         map[string]*template.Template
+	fileSets          []*fileSet
+	templateFiles     []*templateFile
+	textTemplateFiles []*textTemplateFile
+	markdownFiles     []*markdownFile
+	copyFiles         []*copyFile
 
 	ctx *context
 }
@@ -174,6 +176,17 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 				tmpl: tmpl,
 			}
 			s.templateFiles = append(s.templateFiles, tf)
+		case strings.HasSuffix(name, ".tpl"):
+			tmpl, err := texttemplate.ParseFiles(filepath.Join(dir, name))
+			if err != nil {
+				return nil, fmt.Errorf("error loading text template %s: %s", name, err)
+			}
+			tmpl = tmpl.Option("missingkey=error")
+			ttf := &textTemplateFile{
+				name: strings.TrimSuffix(filepath.Base(name), ".tpl"),
+				tmpl: tmpl,
+			}
+			s.textTemplateFiles = append(s.textTemplateFiles, ttf)
 		case strings.HasSuffix(name, ".md"):
 			base := strings.TrimSuffix(name, ".md")
 			tmpl, ok := s.templates[base]
@@ -330,6 +343,11 @@ func loadMarkdownMetadata(pth string) (metadata map[string]interface{}, contents
 type templateFile struct {
 	name string
 	tmpl *template.Template
+}
+
+type textTemplateFile struct {
+	name string
+	tmpl *texttemplate.Template
 }
 
 func (s *sitkin) loadMarkdownFile(name string, tmpl *template.Template) (*markdownFile, error) {
@@ -514,6 +532,11 @@ func (s *sitkin) render() error {
 			return fmt.Errorf("error rendering template %q: %s", tf.name, err)
 		}
 	}
+	for _, ttf := range s.textTemplateFiles {
+		if err := s.renderTextTemplate(ttf); err != nil {
+			return fmt.Errorf("error rendering text template %q: %s", ttf.name, err)
+		}
+	}
 
 	// Render top-level markdown files.
 	for _, md := range s.markdownFiles {
@@ -555,7 +578,7 @@ type fileContext struct {
 }
 
 func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile, hashAssets map[string]string) error {
-	f, err := os.Create(filepath.Join(dir, md.name+".html"))
+	f, err := createFile(filepath.Join(dir, md.name+".html"))
 	if err != nil {
 		return err
 	}
@@ -582,7 +605,7 @@ func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile, hashAssets 
 }
 
 func (s *sitkin) renderTemplate(tf *templateFile, hashAssets map[string]string) error {
-	f, err := os.Create(filepath.Join(s.dir, "gen", tf.name+".html"))
+	f, err := createFile(filepath.Join(s.dir, "gen", tf.name+".html"))
 	if err != nil {
 		return err
 	}
@@ -597,8 +620,20 @@ func (s *sitkin) renderTemplate(tf *templateFile, hashAssets map[string]string) 
 	return f.Close()
 }
 
+func (s *sitkin) renderTextTemplate(ttf *textTemplateFile) error {
+	f, err := createFile(filepath.Join(s.dir, "gen", ttf.name))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := ttf.tmpl.Execute(f, s.ctx); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
 func (s *sitkin) renderMarkdown(md *markdownFile, hashAssets map[string]string) error {
-	f, err := os.Create(filepath.Join(s.dir, "gen", md.name+".html"))
+	f, err := createFile(filepath.Join(s.dir, "gen", md.name+".html"))
 	if err != nil {
 		return err
 	}
@@ -618,6 +653,10 @@ func (s *sitkin) renderMarkdown(md *markdownFile, hashAssets map[string]string) 
 		return fmt.Errorf("error rewriting hashed asset links: %s", err)
 	}
 	return f.Close()
+}
+
+func createFile(name string) (*os.File, error) {
+	return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 }
 
 var defaultMinify = minify.New()

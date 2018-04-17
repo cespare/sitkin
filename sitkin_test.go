@@ -187,14 +187,21 @@ func TestSitkin(t *testing.T) {
 123
 `,
 	)
-	td.writeFile("index.tmpl", `{{define "contents"}}
+	td.writeFile(
+		"index.tmpl",
+		`{{define "contents"}}
 <ol>
 {{range .FileSets.posts.Files}}
 <li>{{.Metadata.title}}</li>
 {{end}}
 </ol>
 {{end}}
-`)
+`,
+	)
+	td.writeFile(
+		"all.txt.tpl",
+		`{{range .FileSets.posts.Files}}[{{.Metadata.title}}]{{end}}`,
+	)
 	td.writeFile("about.md", "# About\n\nabc")
 	td.writeFile("foo.html", "<p>foo</p>")
 	td.writeFile("assets/css/x.css", "css text")
@@ -218,6 +225,7 @@ func TestSitkin(t *testing.T) {
 		"gen/index.html",
 		"<link href="+cssLink+" rel=stylesheet><ol><li>Hello World</ol>",
 	)
+	td.checkFile("gen/all.txt", "[Hello World]")
 	td.checkFile(
 		"gen/about.html",
 		"<link href="+cssLink+" rel=stylesheet><h1>About</h1><p>abc",
