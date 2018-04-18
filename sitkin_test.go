@@ -181,7 +181,7 @@ func TestSitkin(t *testing.T) {
 		"sitkin/default.tmpl",
 		`<html>
 <head>
-<link href="/assets/css/x.css" rel="stylesheet">
+<link href="{{link "/assets/css/x.css"}}" rel="stylesheet">
 </head>
 <body>
 {{block "contents" .}}

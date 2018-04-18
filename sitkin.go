@@ -15,7 +15,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -28,9 +27,7 @@ import (
 
 	"github.com/cespare/fswatch"
 	"github.com/tdewolff/minify"
-	minifyhtml "github.com/tdewolff/minify/html"
-	"golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
+	"github.com/tdewolff/minify/html"
 	blackfriday "gopkg.in/russross/blackfriday.v2"
 )
 
@@ -104,7 +101,7 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	}
 
 	// Load templates.
-	defaultTmpl, err := parseTemplateFile(filepath.Join(sitkinDir, "default.tmpl"))
+	defaultTmpl, err := s.parseTemplateFile(filepath.Join(sitkinDir, "default.tmpl"))
 	if err != nil {
 		return nil, fmt.Errorf("error loading default template: %s", err)
 	}
@@ -119,7 +116,7 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 		if tmplName == "default" {
 			continue
 		}
-		tmpl, err := s.parseTemplateFile(name)
+		tmpl, err := s.parseTemplateFileWithDefault(name)
 		if err != nil {
 			return nil, fmt.Errorf("error loading template %s: %s", name, err)
 		}
@@ -168,7 +165,7 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 			isFileSetName(name):
 			// Don't copy these.
 		case strings.HasSuffix(name, ".tmpl"):
-			tmpl, err := s.parseTemplateFile(filepath.Join(dir, name))
+			tmpl, err := s.parseTemplateFileWithDefault(filepath.Join(dir, name))
 			if err != nil {
 				return nil, fmt.Errorf("error loading template %s: %s", name, err)
 			}
@@ -178,7 +175,7 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 			}
 			s.templateFiles = append(s.templateFiles, tf)
 		case strings.HasSuffix(name, ".tpl"):
-			tmpl, err := parseTextTemplateFile(filepath.Join(dir, name))
+			tmpl, err := s.parseTextTemplateFile(filepath.Join(dir, name))
 			if err != nil {
 				return nil, fmt.Errorf("error loading text template %s: %s", name, err)
 			}
@@ -241,36 +238,54 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	return s, nil
 }
 
-var tmplFuncs = template.FuncMap{
-	"formatRFC3339": func(t time.Time) string { return t.Format(time.RFC3339) },
-	"xmlEscape": func(b template.HTML) (string, error) {
-		var buf strings.Builder
-		if err := xml.EscapeText(&buf, []byte(b)); err != nil {
-			return "", err
-		}
-		return buf.String(), nil
-	},
+func (s *sitkin) tmplFuncs() template.FuncMap {
+	return template.FuncMap{
+		"formatRFC3339": func(t time.Time) string { return t.Format(time.RFC3339) },
+		"xmlEscape": func(b template.HTML) (string, error) {
+			var buf strings.Builder
+			if err := xml.EscapeText(&buf, []byte(b)); err != nil {
+				return "", err
+			}
+			return buf.String(), nil
+		},
+		"link": s.link,
+	}
 }
 
-func parseTemplateFile(name string) (*template.Template, error) {
-	t, err := template.New("").Funcs(tmplFuncs).ParseFiles(name)
-	if err != nil {
-		return nil, err
+func (s *sitkin) link(href string) string {
+	if hashed, ok := s.hashAssets[href]; ok {
+		return hashed
 	}
-	return t.Lookup(filepath.Base(name)).Option("missingkey=error"), nil
-}
-
-var textTmplFuncs = texttemplate.FuncMap(tmplFuncs)
-
-func parseTextTemplateFile(name string) (*texttemplate.Template, error) {
-	t, err := texttemplate.New("").Funcs(textTmplFuncs).ParseFiles(name)
-	if err != nil {
-		return nil, err
-	}
-	return t.Lookup(filepath.Base(name)).Option("missingkey=error"), nil
+	return href
 }
 
 func (s *sitkin) parseTemplateFile(name string) (*template.Template, error) {
+	t, err := template.New("").Funcs(s.tmplFuncs()).ParseFiles(name)
+	if err != nil {
+		return nil, err
+	}
+	return t.Lookup(filepath.Base(name)).Option("missingkey=error"), nil
+}
+
+func (s *sitkin) parseTextTemplateFile(name string) (*texttemplate.Template, error) {
+	funcs := texttemplate.FuncMap(s.tmplFuncs())
+	t, err := texttemplate.New("").Funcs(funcs).ParseFiles(name)
+	if err != nil {
+		return nil, err
+	}
+	return t.Lookup(filepath.Base(name)).Option("missingkey=error"), nil
+}
+
+func (s *sitkin) parseTextTemplate(text string) (*texttemplate.Template, error) {
+	funcs := texttemplate.FuncMap(s.tmplFuncs())
+	t, err := texttemplate.New("").Funcs(funcs).Parse(text)
+	if err != nil {
+		return nil, err
+	}
+	return t.Option("missingkey=error"), nil
+}
+
+func (s *sitkin) parseTemplateFileWithDefault(name string) (*template.Template, error) {
 	t, err := s.templates["default"].Clone()
 	if err != nil {
 		panic(err)
@@ -285,9 +300,10 @@ type fileSet struct {
 }
 
 type markdownFile struct {
-	Name     string
-	tmpl     *template.Template
-	Contents template.HTML // rendered markdown
+	Name         string
+	tmpl         *template.Template
+	markdownTmpl *texttemplate.Template // templatized markdown
+	Contents     template.HTML          // markdownTmpl -> markdown -> HTML
 
 	// The remaining fields are not used for top-level markdown files.
 	Date     time.Time
@@ -322,16 +338,16 @@ func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, err
 			log.Printf("Warning: ignoring strangely-named file %s (invalid date %q)", pth, parts[0])
 			continue
 		}
-		metadata, markdown, err := loadMarkdownMetadata(pth)
+		metadata, markdownTmpl, err := s.loadMarkdownMetadata(pth)
 		if err != nil {
 			return nil, fmt.Errorf("error loading markdown file %s: %s", pth, err)
 		}
 		md := &markdownFile{
-			Name:     parts[1],
-			tmpl:     tmpl,
-			Contents: template.HTML(blackfriday.Run(markdown)),
-			Date:     t,
-			Metadata: metadata,
+			Name:         parts[1],
+			tmpl:         tmpl,
+			markdownTmpl: markdownTmpl,
+			Date:         t,
+			Metadata:     metadata,
 		}
 		if _, ok := names[parts[1]]; ok {
 			return nil, fmt.Errorf("duplicate name (%s) in file set", parts[1])
@@ -352,7 +368,7 @@ func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, err
 	return fs, nil
 }
 
-func loadMarkdownMetadata(pth string) (metadata map[string]interface{}, markdown []byte, err error) {
+func (s *sitkin) loadMarkdownMetadata(pth string) (metadata map[string]interface{}, tmpl *texttemplate.Template, err error) {
 	b, err := ioutil.ReadFile(pth)
 	if err != nil {
 		return nil, nil, err
@@ -361,23 +377,26 @@ func loadMarkdownMetadata(pth string) (metadata map[string]interface{}, markdown
 		begin = []byte("<!--")
 		end   = []byte("-->")
 	)
-	if !bytes.HasPrefix(b, begin) {
-		return nil, b, nil
+	if bytes.HasPrefix(b, begin) {
+		b = b[len(begin):]
+		i := bytes.Index(b, end)
+		if i < 0 {
+			return nil, nil, errors.New("no closing --> to end metadata")
+		}
+		metadata = make(map[string]interface{})
+		if err := json.Unmarshal(b[:i], &metadata); err != nil {
+			return nil, nil, fmt.Errorf("error decoding metadata: %s", err)
+		}
+		b = b[i+len(end):]
+		if len(b) > 0 && b[0] == '\n' {
+			b = b[1:]
+		}
 	}
-	b = b[len(begin):]
-	i := bytes.Index(b, end)
-	if i < 0 {
-		return nil, nil, errors.New("no closing --> to end metadata")
+	tmpl, err = s.parseTextTemplate(string(b))
+	if err != nil {
+		return nil, nil, err
 	}
-	metadata = make(map[string]interface{})
-	if err := json.Unmarshal(b[:i], &metadata); err != nil {
-		return nil, nil, fmt.Errorf("error decoding metadata: %s", err)
-	}
-	b = b[i+len(end):]
-	if len(b) > 0 && b[0] == '\n' {
-		b = b[1:]
-	}
-	return metadata, b, nil
+	return metadata, tmpl, nil
 }
 
 type templateFile struct {
@@ -391,14 +410,14 @@ type textTemplateFile struct {
 }
 
 func (s *sitkin) loadMarkdownFile(name string, tmpl *template.Template) (*markdownFile, error) {
-	b, err := ioutil.ReadFile(name)
+	markdownTmpl, err := s.parseTextTemplateFile(name)
 	if err != nil {
 		return nil, err
 	}
 	return &markdownFile{
-		Name:     strings.TrimSuffix(filepath.Base(name), ".md"),
-		tmpl:     tmpl,
-		Contents: template.HTML(blackfriday.Run(b)),
+		Name:         strings.TrimSuffix(filepath.Base(name), ".md"),
+		tmpl:         tmpl,
+		markdownTmpl: markdownTmpl,
 	}, nil
 }
 
@@ -435,7 +454,7 @@ func (s *sitkin) loadCopyFiles(dir, name string) (copyFiles []*copyFile, hashAss
 			srcPath: relpath,
 			dstPath: relpath,
 		}
-		hashName := !s.devMode
+		hashName := true
 		switch filepath.Ext(pth) {
 		case ".html", "":
 			hashName = false
@@ -451,9 +470,14 @@ func (s *sitkin) loadCopyFiles(dir, name string) (copyFiles []*copyFile, hashAss
 			}
 		}
 		if hashName {
-			h, err := fileHash(pth)
-			if err != nil {
-				return err
+			var h string
+			if s.devMode {
+				h = "NOHASH"
+			} else {
+				h, err = fileHash(pth)
+				if err != nil {
+					return err
+				}
 			}
 			ext := path.Ext(filepath.Base(relpath))
 			cf.dstPath = strings.TrimSuffix(relpath, ext) + "." + h + ext
@@ -540,6 +564,28 @@ func (s *sitkin) render() error {
 		return fmt.Errorf("cannot create gen dir: %s", err)
 	}
 
+	// Render markdown. We do this separately, before rendering the
+	// bottom-level templates because can access the data in the rendered
+	// markdown. For example, a text template could iterate through a
+	// fileset and access each file's Contents field.
+	var buf bytes.Buffer
+	for _, fs := range s.fileSets {
+		for _, f := range fs.Files {
+			buf.Reset()
+			if err := f.markdownTmpl.Execute(&buf, nil); err != nil {
+				return fmt.Errorf("error rendering markdown inside file set %q: %s", fs.name, err)
+			}
+			f.Contents = template.HTML(blackfriday.Run(buf.Bytes()))
+		}
+	}
+	for _, f := range s.markdownFiles {
+		buf.Reset()
+		if err := f.markdownTmpl.Execute(&buf, nil); err != nil {
+			return fmt.Errorf("error rendering markdown file %s: %s", f.Name, err)
+		}
+		f.Contents = template.HTML(blackfriday.Run(buf.Bytes()))
+	}
+
 	// Render file sets.
 	for _, fs := range s.fileSets {
 		if err := s.renderFileSet(fs); err != nil {
@@ -612,8 +658,8 @@ func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile) error {
 	if err := md.tmpl.Execute(&buf, ctx); err != nil {
 		return err
 	}
-	if err := s.rewriteLinksAndMinify(f, &buf); err != nil {
-		return fmt.Errorf("error rewriting hashed asset links: %s", err)
+	if err := minifyHTML(f, &buf); err != nil {
+		return err
 	}
 	return f.Close()
 }
@@ -628,8 +674,8 @@ func (s *sitkin) renderTemplate(tf *templateFile) error {
 	if err := tf.tmpl.Execute(&buf, s.ctx); err != nil {
 		return err
 	}
-	if err := s.rewriteLinksAndMinify(f, &buf); err != nil {
-		return fmt.Errorf("error rewriting hashed asset links: %s", err)
+	if err := minifyHTML(f, &buf); err != nil {
+		return err
 	}
 	return f.Close()
 }
@@ -663,8 +709,8 @@ func (s *sitkin) renderMarkdown(md *markdownFile) error {
 	if err := md.tmpl.Execute(&buf, ctx); err != nil {
 		return err
 	}
-	if err := s.rewriteLinksAndMinify(f, &buf); err != nil {
-		return fmt.Errorf("error rewriting hashed asset links: %s", err)
+	if err := minifyHTML(f, &buf); err != nil {
+		return err
 	}
 	return f.Close()
 }
@@ -675,69 +721,8 @@ func createFile(name string) (*os.File, error) {
 
 var defaultMinify = minify.New()
 
-func (s *sitkin) rewriteLinksAndMinify(w io.Writer, r io.Reader) error {
-	doc, err := html.Parse(r)
-	if err != nil {
-		return err
-	}
-	s.rewriteAssetLinks(doc)
-	pr, pw := io.Pipe()
-	done := make(chan struct{})
-	go func() {
-		err := html.Render(pw, doc)
-		pw.CloseWithError(err)
-		close(done)
-	}()
-	if err := minifyhtml.Minify(defaultMinify, w, pr, nil); err != nil {
-		io.Copy(ioutil.Discard, pr)
-		<-done
-		return err
-	}
-	return nil
-}
-
-func (s *sitkin) rewriteAssetLinks(node *html.Node) {
-	s.rewriteTag(node)
-	for n := node.FirstChild; n != nil; n = n.NextSibling {
-		s.rewriteAssetLinks(n)
-	}
-}
-
-func (s *sitkin) rewriteTag(node *html.Node) {
-	if node.Type != html.ElementNode {
-		return
-	}
-	switch node.DataAtom {
-	case atom.Img:
-		s.rewriteAttr(node.Attr, "src")
-	case atom.Link:
-		s.rewriteAttr(node.Attr, "href")
-	case atom.Script:
-		s.rewriteAttr(node.Attr, "src")
-	}
-}
-
-func (s *sitkin) rewriteAttr(attrs []html.Attribute, name string) {
-	for i := range attrs {
-		attr := &attrs[i]
-		if attr.Namespace != "" || attr.Key != name {
-			continue
-		}
-		u, err := url.Parse(attr.Val)
-		if err != nil {
-			continue
-		}
-		if u.Host != "" {
-			continue
-		}
-		if !strings.HasPrefix(u.Path, "/") {
-			log.Printf("Warning: non-absolute local paths aren't handled (%s)", attr.Val)
-			continue
-		}
-		if hashed, ok := s.hashAssets[u.Path]; ok {
-			attr.Val = hashed
-		}
-	}
+func minifyHTML(w io.Writer, r io.Reader) error {
+	return html.Minify(defaultMinify, w, r, nil)
 }
 
 func main() {
