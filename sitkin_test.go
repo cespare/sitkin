@@ -62,44 +62,83 @@ func TestCopyFiles(t *testing.T) {
 	td.writeFile("d1/x/y/z/f.html", "f")
 	td.writeFile("d1/g.sh", "g")
 
+	bjs := "b." + hashHex("b") + ".js"
+	ccss := "x/c." + hashHex("c") + ".css"
+
 	var files []*copyFile
 	for _, tt := range []struct {
-		name string
-		want []*copyFile
+		name           string
+		want           []*copyFile
+		wantHashAssets [][2]string
 	}{
 		{
 			name: "favicon.ico",
-			want: []*copyFile{{path: "favicon.ico"}},
+			want: []*copyFile{
+				{
+					srcPath: "favicon.ico",
+					dstPath: "favicon.ico",
+				},
+			},
 		},
 		{
 			name: "a.html",
-			want: []*copyFile{{path: "a.html"}},
+			want: []*copyFile{
+				{
+					srcPath: "a.html",
+					dstPath: "a.html",
+				},
+			},
 		},
 		{
 			name: "b.js",
-			want: []*copyFile{{path: "b.js", hashName: true}},
+			want: []*copyFile{
+				{
+					srcPath: "b.js",
+					dstPath: bjs,
+				},
+			},
+			wantHashAssets: [][2]string{{"/b.js", "/" + bjs}},
 		},
 		{
 			name: "x",
 			want: []*copyFile{
-				{path: "x/c.css", hashName: true},
-				{path: "x/y/d.txt"},
-				{path: "x/y/e"},
-				{path: "x/y/z/f.html"},
+				{
+					srcPath: "x/c.css",
+					dstPath: ccss,
+				},
+				{
+					srcPath: "x/y/d.txt",
+					dstPath: "x/y/d.txt",
+				},
+				{
+					srcPath: "x/y/e",
+					dstPath: "x/y/e",
+				},
+				{
+					srcPath: "x/y/z/f.html",
+					dstPath: "x/y/z/f.html",
+				},
 			},
+			wantHashAssets: [][2]string{{"/x/c.css", "/" + ccss}},
 		},
 		{
 			name: "g.sh",
 			want: nil,
 		},
 	} {
-		got, err := s.loadCopyFiles(td.path("d1"), tt.name)
+		got, gotHashAssets, err := s.loadCopyFiles(td.path("d1"), tt.name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("load %s: got\n\n%s\n\nwant\n\n%s",
 				tt.name, pretty.Sprint(got), pretty.Sprint(tt.want))
+			continue
+		}
+		if !reflect.DeepEqual(gotHashAssets, tt.wantHashAssets) {
+			t.Errorf("load %s: got hash assets\n\n%s\n\nwant\n\n%s",
+				tt.name, pretty.Sprint(gotHashAssets), pretty.Sprint(tt.wantHashAssets))
+			continue
 		}
 		files = append(files, got...)
 	}
@@ -107,24 +146,9 @@ func TestCopyFiles(t *testing.T) {
 		t.FailNow()
 	}
 
-	bjs := "b." + hashHex("b") + ".js"
-	ccss := "x/c." + hashHex("c") + ".css"
-
-	for i, want := range []string{
-		"favicon.ico",
-		"a.html",
-		bjs,
-		ccss,
-		"x/y/d.txt",
-		"x/y/e",
-	} {
-		cf := files[i]
-		got, err := cf.copy(td.path("d1"), td.path("d2"))
-		if err != nil {
+	for _, cf := range files {
+		if err := cf.copy(td.path("d1"), td.path("d2")); err != nil {
 			t.Fatal(err)
-		}
-		if got != want {
-			t.Errorf("copy %s: got relDst %s; want %s", cf.path, got, want)
 		}
 	}
 

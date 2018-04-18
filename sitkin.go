@@ -9,7 +9,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"hash"
 	"html/template"
 	"io"
 	"io/ioutil"
@@ -51,6 +50,7 @@ type sitkin struct {
 	textTemplateFiles []*textTemplateFile
 	markdownFiles     []*markdownFile
 	copyFiles         []*copyFile
+	hashAssets        map[string]string // "/styles/x.css" -> "/styles/x.asdf123.css"
 
 	ctx *context
 }
@@ -70,10 +70,11 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	}
 
 	s := &sitkin{
-		dir:       dir,
-		devMode:   devMode,
-		verbose:   verbose,
-		templates: make(map[string]*template.Template),
+		dir:        dir,
+		devMode:    devMode,
+		verbose:    verbose,
+		templates:  make(map[string]*template.Template),
+		hashAssets: make(map[string]string),
 		ctx: &context{
 			DevMode:  devMode,
 			FileSets: make(map[string]*fileSet),
@@ -200,11 +201,14 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 			}
 			s.markdownFiles = append(s.markdownFiles, md)
 		default:
-			copyFiles, err := s.loadCopyFiles(dir, name)
+			copyFiles, hashAssets, err := s.loadCopyFiles(dir, name)
 			if err != nil {
 				return nil, fmt.Errorf("error loading files to copy from %s: %s", name, err)
 			}
 			s.copyFiles = append(s.copyFiles, copyFiles...)
+			for _, pair := range hashAssets {
+				s.hashAssets[pair[0]] = pair[1]
+			}
 		}
 	}
 
@@ -220,6 +224,18 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	// Fill in context.
 	for _, fs := range s.fileSets {
 		s.ctx.FileSets[fs.name] = fs
+	}
+
+	if s.verbose {
+		log.Println("Hashed assets:")
+		var keys []string
+		for k := range s.hashAssets {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			log.Printf("  %s -> %s", k, s.hashAssets[k])
+		}
 	}
 
 	return s, nil
@@ -387,12 +403,11 @@ func (s *sitkin) loadMarkdownFile(name string, tmpl *template.Template) (*markdo
 }
 
 type copyFile struct {
-	path     string // relative to source/dest dir
-	hashName bool
+	srcPath string // relative to source dir
+	dstPath string // relative to dst dir; same as srcPath unless this has a hash name
 }
 
-func (s *sitkin) loadCopyFiles(dir, name string) ([]*copyFile, error) {
-	var copyFiles []*copyFile
+func (s *sitkin) loadCopyFiles(dir, name string) (copyFiles []*copyFile, hashAssets [][2]string, err error) {
 	walk := func(pth string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -417,12 +432,13 @@ func (s *sitkin) loadCopyFiles(dir, name string) ([]*copyFile, error) {
 			return nil
 		}
 		cf := &copyFile{
-			path:     relpath,
-			hashName: !s.devMode,
+			srcPath: relpath,
+			dstPath: relpath,
 		}
+		hashName := !s.devMode
 		switch filepath.Ext(pth) {
 		case ".html", "":
-			cf.hashName = false
+			hashName = false
 		}
 		for _, glob := range s.config.NoHash {
 			match, err := path.Match(glob, filepath.ToSlash(relpath))
@@ -430,68 +446,73 @@ func (s *sitkin) loadCopyFiles(dir, name string) ([]*copyFile, error) {
 				panic(err) // already checked
 			}
 			if match {
-				cf.hashName = false
+				hashName = false
 				break
 			}
+		}
+		if hashName {
+			h, err := fileHash(pth)
+			if err != nil {
+				return err
+			}
+			ext := path.Ext(filepath.Base(relpath))
+			cf.dstPath = strings.TrimSuffix(relpath, ext) + "." + h + ext
+			hashAssets = append(hashAssets, [2]string{
+				"/" + filepath.ToSlash(cf.srcPath),
+				"/" + filepath.ToSlash(cf.dstPath),
+			})
 		}
 		copyFiles = append(copyFiles, cf)
 		return nil
 	}
 	if err := filepath.Walk(filepath.Join(dir, name), walk); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return copyFiles, nil
+	return copyFiles, hashAssets, nil
 }
 
-func (cf *copyFile) copy(srcDir, dstDir string) (relDst string, err error) {
-	src := filepath.Join(srcDir, cf.path)
-	f, err := os.Open(src)
+func fileHash(name string) (string, error) {
+	f, err := os.Open(name)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)[:12]), nil
+}
+
+func (cf *copyFile) copy(srcDir, dstDir string) error {
+	src := filepath.Join(srcDir, cf.srcPath)
+	dst := filepath.Join(dstDir, cf.dstPath)
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 	stat, err := f.Stat()
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	base := filepath.Base(cf.path)
-	parent := filepath.Dir(filepath.Join(dstDir, cf.path))
+	parent := filepath.Dir(dst)
 	if err := os.MkdirAll(parent, 0755); err != nil {
-		return "", err
+		return err
 	}
-	tmp, err := tempFile(parent, base, stat.Mode())
+	tmp, err := tempFile(parent, filepath.Base(dst), stat.Mode())
 	if err != nil {
-		return "", err
+		return err
 	}
-	var w io.Writer = tmp
-	var h hash.Hash
-	if cf.hashName {
-		h = sha256.New()
-		w = io.MultiWriter(tmp, h)
-	}
-	if _, err := io.Copy(w, f); err != nil {
+	if _, err := io.Copy(tmp, f); err != nil {
 		tmp.Close()
-		return "", err
+		return err
 	}
 	if err := tmp.Close(); err != nil {
-		return "", err
+		return err
 	}
-	if cf.hashName {
-		ext := path.Ext(base)
-		prefix := strings.TrimSuffix(base, ext)
-		hashStr := hex.EncodeToString(h.Sum(nil)[:12])
-		base = prefix + "." + hashStr + ext
-	}
-	dst := filepath.Join(parent, base)
-	if err = os.Rename(tmp.Name(), dst); err != nil {
-		return "", err
-	}
-	relDst, err = filepath.Rel(dstDir, dst)
-	if err != nil {
-		panic(err)
-	}
-	return relDst, nil
+	return os.Rename(tmp.Name(), dst)
 }
 
 func tempFile(dir, prefix string, mode os.FileMode) (*os.File, error) {
@@ -519,40 +540,16 @@ func (s *sitkin) render() error {
 		return fmt.Errorf("cannot create gen dir: %s", err)
 	}
 
-	// Copy assets.
-	hashAssets := make(map[string]string) // "/styles/x.css" -> "/styles/x.asdf123.css"
-	toURLPath := func(rel string) string {
-		return "/" + filepath.ToSlash(rel)
-	}
-	for _, cf := range s.copyFiles {
-		relDst, err := cf.copy(s.dir, genDir)
-		if err != nil {
-			return err
-		}
-		hashAssets[toURLPath(cf.path)] = toURLPath(relDst)
-	}
-	if s.verbose {
-		log.Println("Hashed assets:")
-		var keys []string
-		for k := range hashAssets {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			log.Printf("  %s -> %s", k, hashAssets[k])
-		}
-	}
-
 	// Render file sets.
 	for _, fs := range s.fileSets {
-		if err := s.renderFileSet(fs, hashAssets); err != nil {
+		if err := s.renderFileSet(fs); err != nil {
 			return fmt.Errorf("error rendering file set %q: %s", fs.name, err)
 		}
 	}
 
 	// Render top-level templates.
 	for _, tf := range s.templateFiles {
-		if err := s.renderTemplate(tf, hashAssets); err != nil {
+		if err := s.renderTemplate(tf); err != nil {
 			return fmt.Errorf("error rendering template %q: %s", tf.name, err)
 		}
 	}
@@ -564,21 +561,28 @@ func (s *sitkin) render() error {
 
 	// Render top-level markdown files.
 	for _, md := range s.markdownFiles {
-		if err := s.renderMarkdown(md, hashAssets); err != nil {
+		if err := s.renderMarkdown(md); err != nil {
 			return fmt.Errorf("error rendering markdown file %q: %s", md.Name, err)
+		}
+	}
+
+	// Copy assets.
+	for _, cf := range s.copyFiles {
+		if err := cf.copy(s.dir, genDir); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-func (s *sitkin) renderFileSet(fs *fileSet, hashAssets map[string]string) error {
+func (s *sitkin) renderFileSet(fs *fileSet) error {
 	dir := filepath.Join(s.dir, "gen", fs.name)
 	if err := os.Mkdir(dir, 0755); err != nil {
 		return err
 	}
 	for _, md := range fs.Files {
-		if err := s.renderFileSetMarkdown(dir, md, hashAssets); err != nil {
+		if err := s.renderFileSetMarkdown(dir, md); err != nil {
 			return err
 		}
 	}
@@ -591,7 +595,7 @@ type context struct {
 	FileSets map[string]*fileSet
 }
 
-func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile, hashAssets map[string]string) error {
+func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile) error {
 	f, err := createFile(filepath.Join(dir, md.Name+".html"))
 	if err != nil {
 		return err
@@ -608,13 +612,13 @@ func (s *sitkin) renderFileSetMarkdown(dir string, md *markdownFile, hashAssets 
 	if err := md.tmpl.Execute(&buf, ctx); err != nil {
 		return err
 	}
-	if err := rewriteLinksAndMinify(f, &buf, hashAssets); err != nil {
+	if err := s.rewriteLinksAndMinify(f, &buf); err != nil {
 		return fmt.Errorf("error rewriting hashed asset links: %s", err)
 	}
 	return f.Close()
 }
 
-func (s *sitkin) renderTemplate(tf *templateFile, hashAssets map[string]string) error {
+func (s *sitkin) renderTemplate(tf *templateFile) error {
 	f, err := createFile(filepath.Join(s.dir, "gen", tf.name+".html"))
 	if err != nil {
 		return err
@@ -624,7 +628,7 @@ func (s *sitkin) renderTemplate(tf *templateFile, hashAssets map[string]string) 
 	if err := tf.tmpl.Execute(&buf, s.ctx); err != nil {
 		return err
 	}
-	if err := rewriteLinksAndMinify(f, &buf, hashAssets); err != nil {
+	if err := s.rewriteLinksAndMinify(f, &buf); err != nil {
 		return fmt.Errorf("error rewriting hashed asset links: %s", err)
 	}
 	return f.Close()
@@ -642,7 +646,7 @@ func (s *sitkin) renderTextTemplate(ttf *textTemplateFile) error {
 	return f.Close()
 }
 
-func (s *sitkin) renderMarkdown(md *markdownFile, hashAssets map[string]string) error {
+func (s *sitkin) renderMarkdown(md *markdownFile) error {
 	f, err := createFile(filepath.Join(s.dir, "gen", md.Name+".html"))
 	if err != nil {
 		return err
@@ -659,7 +663,7 @@ func (s *sitkin) renderMarkdown(md *markdownFile, hashAssets map[string]string) 
 	if err := md.tmpl.Execute(&buf, ctx); err != nil {
 		return err
 	}
-	if err := rewriteLinksAndMinify(f, &buf, hashAssets); err != nil {
+	if err := s.rewriteLinksAndMinify(f, &buf); err != nil {
 		return fmt.Errorf("error rewriting hashed asset links: %s", err)
 	}
 	return f.Close()
@@ -671,12 +675,12 @@ func createFile(name string) (*os.File, error) {
 
 var defaultMinify = minify.New()
 
-func rewriteLinksAndMinify(w io.Writer, r io.Reader, hashAssets map[string]string) error {
+func (s *sitkin) rewriteLinksAndMinify(w io.Writer, r io.Reader) error {
 	doc, err := html.Parse(r)
 	if err != nil {
 		return err
 	}
-	rewriteAssetLinks(doc, hashAssets)
+	s.rewriteAssetLinks(doc)
 	pr, pw := io.Pipe()
 	done := make(chan struct{})
 	go func() {
@@ -692,28 +696,28 @@ func rewriteLinksAndMinify(w io.Writer, r io.Reader, hashAssets map[string]strin
 	return nil
 }
 
-func rewriteAssetLinks(node *html.Node, hashAssets map[string]string) {
-	rewriteTag(node, hashAssets)
+func (s *sitkin) rewriteAssetLinks(node *html.Node) {
+	s.rewriteTag(node)
 	for n := node.FirstChild; n != nil; n = n.NextSibling {
-		rewriteAssetLinks(n, hashAssets)
+		s.rewriteAssetLinks(n)
 	}
 }
 
-func rewriteTag(node *html.Node, hashAssets map[string]string) {
+func (s *sitkin) rewriteTag(node *html.Node) {
 	if node.Type != html.ElementNode {
 		return
 	}
 	switch node.DataAtom {
 	case atom.Img:
-		rewriteAttr(node.Attr, "src", hashAssets)
+		s.rewriteAttr(node.Attr, "src")
 	case atom.Link:
-		rewriteAttr(node.Attr, "href", hashAssets)
+		s.rewriteAttr(node.Attr, "href")
 	case atom.Script:
-		rewriteAttr(node.Attr, "src", hashAssets)
+		s.rewriteAttr(node.Attr, "src")
 	}
 }
 
-func rewriteAttr(attrs []html.Attribute, name string, hashAssets map[string]string) {
+func (s *sitkin) rewriteAttr(attrs []html.Attribute, name string) {
 	for i := range attrs {
 		attr := &attrs[i]
 		if attr.Namespace != "" || attr.Key != name {
@@ -730,7 +734,7 @@ func rewriteAttr(attrs []html.Attribute, name string, hashAssets map[string]stri
 			log.Printf("Warning: non-absolute local paths aren't handled (%s)", attr.Val)
 			continue
 		}
-		if hashed, ok := hashAssets[u.Path]; ok {
+		if hashed, ok := s.hashAssets[u.Path]; ok {
 			attr.Val = hashed
 		}
 	}
