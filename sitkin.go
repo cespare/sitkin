@@ -26,8 +26,8 @@ import (
 	"time"
 
 	"github.com/cespare/fswatch"
-	"github.com/tdewolff/minify"
-	"github.com/tdewolff/minify/html"
+	"github.com/tdewolff/minify/v2"
+	"github.com/tdewolff/minify/v2/html"
 	blackfriday "gopkg.in/russross/blackfriday.v2"
 )
 
