@@ -26,9 +26,9 @@ import (
 	"time"
 
 	"github.com/cespare/fswatch"
+	"github.com/russross/blackfriday/v2"
 	"github.com/tdewolff/minify/v2"
 	"github.com/tdewolff/minify/v2/html"
-	blackfriday "gopkg.in/russross/blackfriday.v2"
 )
 
 type sitkin struct {
