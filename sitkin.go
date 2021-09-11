@@ -25,7 +25,6 @@ import (
 	texttemplate "text/template"
 	"time"
 
-	"github.com/cespare/fswatch"
 	"github.com/russross/blackfriday/v2"
 	"github.com/tdewolff/minify/v2"
 	"github.com/tdewolff/minify/v2/html"
@@ -766,16 +765,9 @@ If dir is not given, then the current directory is used.
 	build(dir, true, *verbose)
 
 	go func() {
-		events, errs, err := fswatch.Watch(dir, 500*time.Millisecond, "gen")
-		if err != nil {
-			log.Fatalln("Cannot watch project dir for changes:", err)
-		}
-		go func() {
-			err := <-errs
+		doBuild := func() { build(dir, true, *verbose) }
+		if err := watchDir(dir, 500*time.Millisecond, doBuild, "gen"); err != nil {
 			log.Fatalln("Error watching project dir for changes:", err)
-		}()
-		for range events {
-			build(dir, true, *verbose)
 		}
 	}()
 
