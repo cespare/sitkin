@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -504,8 +504,25 @@ func fileHash(name string) (string, error) {
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)[:12]), nil
+	return base62Hash(h.Sum(nil)[:8]), nil
 }
+
+// base62Hash generates a 10-character base62 string from 8 bytes of a hash.
+// This is fairly short, but enough for collision avoidance (about 60 bits).
+func base62Hash(b []byte) string {
+	var sb strings.Builder
+	const hashLen = 10
+	sb.Grow(hashLen)
+	n := binary.BigEndian.Uint64(b)
+	var m uint64
+	for i := 0; i < hashLen; i++ {
+		n, m = n/62, n%62
+		sb.WriteByte(base62Alphabet[m])
+	}
+	return sb.String()
+}
+
+const base62Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func (cf *copyFile) copy(srcDir, dstDir string) error {
 	src := filepath.Join(srcDir, cf.srcPath)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -62,8 +61,8 @@ func TestCopyFiles(t *testing.T) {
 	td.writeFile("d1/x/y/z/f.html", "f")
 	td.writeFile("d1/g.sh", "g")
 
-	bjs := "b." + hashHex("b") + ".js"
-	ccss := "x/c." + hashHex("c") + ".css"
+	bjs := "b." + hashBase62("b") + ".js"
+	ccss := "x/c." + hashBase62("c") + ".css"
 
 	var files []*copyFile
 	for _, tt := range []struct {
@@ -160,9 +159,9 @@ func TestCopyFiles(t *testing.T) {
 	td.checkFile("d2/x/y/e", "e")
 }
 
-func hashHex(s string) string {
+func hashBase62(s string) string {
 	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:12])
+	return base62Hash(h[:8])
 }
 
 func TestSitkin(t *testing.T) {
@@ -240,7 +239,7 @@ func TestSitkin(t *testing.T) {
 		t.Fatal("render failed:", err)
 	}
 
-	cssLink := "/assets/css/x." + hashHex("css text") + ".css"
+	cssLink := "/assets/css/x." + hashBase62("css text") + ".css"
 	td.checkFile(
 		"gen/posts/hello-world.html",
 		"<link href="+cssLink+" rel=stylesheet>Hello World<h1>Hello World</h1><p>123",
@@ -255,7 +254,7 @@ func TestSitkin(t *testing.T) {
 		"<link href="+cssLink+" rel=stylesheet><h1>About</h1><p>abc",
 	)
 	td.checkFile("gen/foo.html", "<p>foo</p>")
-	td.checkFile("gen/assets/css/x."+hashHex("css text")+".css", "css text")
+	td.checkFile("gen/assets/css/x."+hashBase62("css text")+".css", "css text")
 	td.checkNotExist("gen/x.ignore")
 	td.checkFile("gen/favicon.ico", "favicon")
 }
