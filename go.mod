@@ -1,12 +1,17 @@
 module github.com/cespare/sitkin
 
 require (
-	github.com/fsnotify/fsnotify v1.5.1
-	github.com/kr/pretty v0.0.0-20160823170715-cfb55aafdaf3
-	github.com/kr/text v0.0.0-20160504234017-7cafcd837844 // indirect
+	github.com/fsnotify/fsnotify v1.7.0
+	github.com/kr/pretty v0.3.1
 	github.com/russross/blackfriday/v2 v2.1.0
-	github.com/tdewolff/minify/v2 v2.9.21
-	golang.org/x/sys v0.0.0-20210910150752-751e447fb3d0 // indirect
+	github.com/tdewolff/minify/v2 v2.20.37
 )
 
-go 1.13
+require (
+	github.com/kr/text v0.2.0 // indirect
+	github.com/rogpeppe/go-internal v1.9.0 // indirect
+	github.com/tdewolff/parse/v2 v2.7.15 // indirect
+	golang.org/x/sys v0.16.0 // indirect
+)
+
+go 1.23
