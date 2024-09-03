@@ -3,8 +3,8 @@ module github.com/cespare/sitkin
 require (
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/kr/pretty v0.3.1
-	github.com/russross/blackfriday/v2 v2.1.0
 	github.com/tdewolff/minify/v2 v2.20.37
+	github.com/yuin/goldmark v1.7.4
 )
 
 require (

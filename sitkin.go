@@ -24,9 +24,10 @@ import (
 	texttemplate "text/template"
 	"time"
 
-	"github.com/russross/blackfriday/v2"
 	"github.com/tdewolff/minify/v2"
 	"github.com/tdewolff/minify/v2/html"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 )
 
 type sitkin struct {
@@ -590,7 +591,7 @@ func (s *sitkin) render() error {
 			if err := f.markdownTmpl.Execute(&buf, nil); err != nil {
 				return fmt.Errorf("error rendering markdown inside file set %q: %s", fs.name, err)
 			}
-			f.Contents = template.HTML(blackfriday.Run(buf.Bytes()))
+			f.Contents = template.HTML(renderMarkdown(buf.Bytes()))
 		}
 	}
 	for _, f := range s.markdownFiles {
@@ -598,7 +599,7 @@ func (s *sitkin) render() error {
 		if err := f.markdownTmpl.Execute(&buf, nil); err != nil {
 			return fmt.Errorf("error rendering markdown file %s: %s", f.Name, err)
 		}
-		f.Contents = template.HTML(blackfriday.Run(buf.Bytes()))
+		f.Contents = template.HTML(renderMarkdown(buf.Bytes()))
 	}
 
 	// Render file sets.
@@ -635,6 +636,20 @@ func (s *sitkin) render() error {
 	}
 
 	return nil
+}
+
+var markdownRenderer = goldmark.New(goldmark.WithExtensions(
+	extension.GFM,
+	extension.Typographer,
+))
+
+func renderMarkdown(input []byte) []byte {
+	var buf bytes.Buffer
+	if err := markdownRenderer.Convert(input, &buf); err != nil {
+		// The errors should only come from writing to the output.
+		panic(err)
+	}
+	return buf.Bytes()
 }
 
 func (s *sitkin) renderFileSet(fs *fileSet) error {
