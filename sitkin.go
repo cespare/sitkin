@@ -28,6 +28,7 @@ import (
 	"github.com/tdewolff/minify/v2/html"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
+	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 )
 
 type sitkin struct {
@@ -638,10 +639,13 @@ func (s *sitkin) render() error {
 	return nil
 }
 
-var markdownRenderer = goldmark.New(goldmark.WithExtensions(
-	extension.GFM,
-	extension.Typographer,
-))
+var markdownRenderer = goldmark.New(
+	goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
+	goldmark.WithExtensions(
+		extension.GFM,
+		extension.Typographer,
+	),
+)
 
 func renderMarkdown(input []byte) []byte {
 	var buf bytes.Buffer
