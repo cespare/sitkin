@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -268,7 +267,7 @@ func newTempDir(t *testing.T) tempDir {
 	t.Helper()
 	// Put the temp dir inside go test's temp directory (if we're running
 	// under go test).
-	dir, err := ioutil.TempDir(goTestTempDir(), "sitkin-test-")
+	dir, err := os.MkdirTemp(goTestTempDir(), "sitkin-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,17 +292,17 @@ func (td tempDir) path(name string) string {
 func (td tempDir) writeFile(name, contents string) {
 	td.t.Helper()
 	pth := td.path(name)
-	if err := os.MkdirAll(filepath.Dir(pth), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(pth), 0o755); err != nil {
 		td.t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(pth, []byte(contents), 0644); err != nil {
+	if err := os.WriteFile(pth, []byte(contents), 0o644); err != nil {
 		td.t.Fatal(err)
 	}
 }
 
 func (td tempDir) checkFile(name, contents string) {
 	td.t.Helper()
-	b, err := ioutil.ReadFile(td.path(name))
+	b, err := os.ReadFile(td.path(name))
 	if err != nil {
 		td.t.Error(err)
 		return

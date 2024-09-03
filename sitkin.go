@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -151,7 +150,7 @@ func load(dir string, devMode, verbose bool) (*sitkin, error) {
 	}
 
 	// Categorize all the rest of the files in the project.
-	fis, err := ioutil.ReadDir(dir)
+	fis, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("error reading files in project dir: %s", err)
 	}
@@ -310,7 +309,7 @@ type markdownFile struct {
 }
 
 func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, error) {
-	fis, err := ioutil.ReadDir(dir)
+	fis, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +367,7 @@ func (s *sitkin) loadFileSet(dir string, tmpl *template.Template) (*fileSet, err
 }
 
 func (s *sitkin) loadMarkdownMetadata(pth string) (metadata map[string]interface{}, tmpl *texttemplate.Template, err error) {
-	b, err := ioutil.ReadFile(pth)
+	b, err := os.ReadFile(pth)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -538,7 +537,7 @@ func (cf *copyFile) copy(srcDir, dstDir string) error {
 	}
 
 	parent := filepath.Dir(dst)
-	if err := os.MkdirAll(parent, 0755); err != nil {
+	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return err
 	}
 	tmp, err := tempFile(parent, filepath.Base(dst), stat.Mode())
@@ -576,14 +575,14 @@ func (s *sitkin) render() error {
 			return fmt.Errorf("cannot remove existing gen dir: %s", err)
 		}
 	}
-	if err := os.Mkdir(genDir, 0755); err != nil {
+	if err := os.Mkdir(genDir, 0o755); err != nil {
 		return fmt.Errorf("cannot create gen dir: %s", err)
 	}
 
 	// Render markdown. We do this separately, before rendering the
-	// bottom-level templates because can access the data in the rendered
-	// markdown. For example, a text template could iterate through a
-	// fileset and access each file's Contents field.
+	// bottom-level templates, because they can access the data in the
+	// rendered markdown. For example, a text template could iterate through
+	// a fileset and access each file's Contents field.
 	var buf bytes.Buffer
 	for _, fs := range s.fileSets {
 		for _, f := range fs.Files {
@@ -640,7 +639,7 @@ func (s *sitkin) render() error {
 
 func (s *sitkin) renderFileSet(fs *fileSet) error {
 	dir := filepath.Join(s.dir, "gen", fs.name)
-	if err := os.Mkdir(dir, 0755); err != nil {
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		return err
 	}
 	for _, md := range fs.Files {
@@ -732,7 +731,7 @@ func (s *sitkin) renderMarkdown(md *markdownFile) error {
 }
 
 func createFile(name string) (*os.File, error) {
-	return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 }
 
 var defaultMinify = minify.New()
@@ -821,7 +820,6 @@ If dir is not given, then the current directory is used.
 
 	fs := http.FileServer(http.Dir(filepath.Join(dir, "gen")))
 	log.Fatal(http.Serve(ln, fs))
-
 }
 
 func build(dir string, devMode, verbose bool) {
